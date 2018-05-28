@@ -24,7 +24,7 @@ import           Control.Concurrent
 --import           Control.Lens
 --import           Control.Monad
 --import           Control.Monad.Reader
-import           Control.Monad.State
+--import           Control.Monad.State
 
 import           Data.IORef
 import           Data.Maybe
@@ -791,9 +791,9 @@ instance CanAnimate GtkWindow where
   animationIsRunning = runGtkStateGUI $
     gets theAnimatorThread <&> \ case { Disconnected -> False; _ -> True; }
   stepFrameEvents react = do
-    flip (installEventHandler "stepFrameEvents" animatorThread []) react $ \ logGUI env next -> do
+    flip (installEventHandler "stepFrameEvents" animatorThread []) react $ \ logGUI _env next -> do
       --let rate = env & theAnimationFrameRate . currentConfig -- TODO: restore this!!!
-      let rate = 0.05 -- any slow rate
+      let rate = 0.05 :: Double -- any slow rate
       t0    <- getCurrentTime
       t0ref <- newIORef AnimationThreadControl
         { animationThreadAlive = True

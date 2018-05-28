@@ -116,8 +116,8 @@ Library {
     pango                >=0.13.4.0 && <0.14.0.0,
     semigroups           >=0.16.0   && <0.19.0,
     text                 >=1.1.1.4  && <=2.0.0.0,
-    time                 >=1.4.0.0  && <=1.6.0.0,
-    base                 >=4.7      && <4.9
+    time                 >=1.4.0.0  && <=1.7.0.0,
+    base                 >=4.7      && <4.10
 
   DEFAULT-EXTENSIONS:
     DeriveDataTypeable
@@ -167,10 +167,10 @@ Test-suite happlets-lib-gtk-test {
     mtl                  >=2.2.0    && <=2.2.1,
     semigroups           >=0.16.0   && <0.19.0,
     text                 >=1.1.1.4  && <=2.0.0.0,
-    time                 >=1.4.0.0  && <=1.6.0.0,
+    time                 >=1.4.0.0  && <=1.7.0.0,
 --    transformers         >=0.3.0.0  && <=0.4.3.0,
 --    unix                 >=2.7.0.0  && <=2.8.0.0,
-    base                 >=4.7      && <4.9
+    base                 >=4.7      && <4.10
 
   DEFAULT-EXTENSIONS:
     DeriveDataTypeable
