@@ -31,11 +31,11 @@ SYNOPSIS:       The "Haskell Applets" Gtk+ ver. 2 back-end for "happlets".
 
 DESCRIPTION:   
     .
-    *WARNING:* There are still some known bugs in this package, it is being
-    uploaded to Hackage for evaluation purposes only. Although it is being
-    actively developed, there is no release schedule for a production-ready
-    version of this package. Contributions to the repository on GitHub are
-    welcome.
+    -- *WARNING* -- There are still some known bugs in this package, it is
+    being uploaded to Hackage for evaluation purposes only. Although it is
+    being actively developed, there is no release schedule for a
+    production-ready version of this package. Contributions to the
+    repository on GitHub are welcome.
     .
     This packages provides the Gtk+ v2 back-end to the "happlets" GUI
     framework. To create a Gtk+ applet, import the "Happlets.Lib.Gtk"
@@ -64,9 +64,9 @@ DESCRIPTION:
     .
     Please refer to the Happlets package on the Hackage website:
     .
-    https://hackage.haskell.org/package/happlets
+    [happlets]( https://hackage.haskell.org/package/happlets )
     .
-　  *Known bugs:*
+    -- Known bugs --
     .
     The implementation for the 'windowChangeHapplet' function in the
     'Happlets.GUI.HappletWindow' type class is known to result in the window
@@ -81,8 +81,8 @@ DESCRIPTION:
     .
     The 'Happlets.GUI.CanBufferImages' type class has not been tested at
     all, and in fact I am evaluating the possibility of rewriting the
-    implementation to make use of Cairo "Surfaces" rather than Gtk+
-    "PixMaps" as the means by which to buffer off-screen images.
+    implementation to make use of Cairo "Surfaces" rather than Gtk+ "PixMaps"
+    as the means by which to buffer off-screen images.
     .
     Another bug is in the screen refresh. Every time the graphics in the
     window change, the entire window is re-blitted, which is very
@@ -112,12 +112,12 @@ Library {
     happlets             >=0.1.0.0  && <1.0.0.0,
     lens                 >=4.0.0.0  && <5.0.0.0,
     linear               >=1.20.0   && <2.0.0.0,
-    mtl                  >=2.2.0    && <=2.2.1,
+    mtl                  >=2.2.0    && <=2.2.2,
     pango                >=0.13.4.0 && <0.14.0.0,
     semigroups           >=0.16.0   && <0.19.0,
     text                 >=1.1.1.4  && <=2.0.0.0,
-    time                 >=1.4.0.0  && <=1.7.0.0,
-    base                 >=4.7      && <4.10
+    time                 >=1.4.0.0  && <=1.9.1,
+    base                 >=4.7      && <4.11
 
   DEFAULT-EXTENSIONS:
     DeriveDataTypeable
@@ -164,13 +164,13 @@ Test-suite happlets-lib-gtk-test {
     happlets             >=0.1.0.0  && <1.0.0.0,
     lens                 >=4.0.0.0  && <5.0.0.0,
     linear               >=1.20.0   && <2.0.0.0,
-    mtl                  >=2.2.0    && <=2.2.1,
+    mtl                  >=2.2.0    && <=2.2.2,
     semigroups           >=0.16.0   && <0.19.0,
     text                 >=1.1.1.4  && <=2.0.0.0,
-    time                 >=1.4.0.0  && <=1.7.0.0,
+    time                 >=1.4.0.0  && <=1.9.1,
 --    transformers         >=0.3.0.0  && <=0.4.3.0,
 --    unix                 >=2.7.0.0  && <=2.8.0.0,
-    base                 >=4.7      && <4.10
+    base                 >=4.7      && <4.11
 
   DEFAULT-EXTENSIONS:
     DeriveDataTypeable
