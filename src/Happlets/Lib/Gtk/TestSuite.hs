@@ -10,6 +10,14 @@ import qualified Graphics.Rendering.Cairo as Cairo
 
 ----------------------------------------------------------------------------------------------------
 
+-- This data structure contains the GUI functions which initialize each Happlet that can be attached
+-- to the test suite window.
+data TestSuite
+  = TestSuite
+    { switchToPulseCircle :: GtkGUI RedGrid ()
+    , switchToRedGrid     :: GtkGUI PulseCircle ()
+    }
+
 main :: IO ()
 main = happlet gtkHapplet $ do
   registeredAppName   .= "Happlets-Test"
@@ -26,13 +34,12 @@ main = happlet gtkHapplet $ do
 
   redgrid     <- newHapplet (RedGrid 64.0)
 
-  let (changeToPulseCircle, changeToRedGrid) =
-        ( windowChangeHapplet pulsecircle $ pulseCircleGUI changeToRedGrid
-        , windowChangeHapplet redgrid $ redGridGUI changeToPulseCircle
-        )
-  attachWindow True win pulsecircle $ pulseCircleGUI changeToRedGrid
-  launchGUIEventLoop
-  deleteWindow win
+  let testSuite = TestSuite
+        { switchToPulseCircle = windowChangeHapplet pulsecircle $ pulseCircleGUI testSuite
+        , switchToRedGrid     = windowChangeHapplet redgrid     $ redGridGUI     testSuite
+        }
+
+  attachWindow True win redgrid $ redGridGUI testSuite
 
 ----------------------------------------------------------------------------------------------------
 
@@ -54,15 +61,16 @@ redGridDraw scale = fmap realToFrac >>> \ size@(V2 w h) ->
     forM_ (around w centerX) $ drawLine red 1.0 . mkLine V2 h
     forM_ (around h centerY) $ drawLine red 1.0 . mkLine (flip V2) w
 
-redGridGUI :: GtkGUI RedGrid () -> PixSize -> GtkGUI RedGrid ()
-redGridGUI ctxSwitch _size = do
+redGridGUI :: TestSuite -> PixSize -> GtkGUI RedGrid ()
+redGridGUI ctx _size = do
   let draw = use redGridScale >>= onView . redGridDraw
   resizeEvents $ const draw
-  mouseEvents MouseButton $ \ (Mouse _ _ _ button _) -> case button of
-    RightClick -> ctxSwitch
+  mouseEvents MouseButton $ \ (Mouse _ down _ button _) -> when down $ case button of
+    RightClick -> switchToPulseCircle ctx
     _          -> do
       scale <- use redGridScale
       redGridScale .= if scale <= 4.0 then 64.0 else scale / 2.0
+      draw
   draw
 
 ----------------------------------------------------------------------------------------------------
@@ -100,8 +108,8 @@ circle (V2 x y) radius red green blue alpha = CairoRender $ do
   Cairo.fill
   Cairo.setOperator op
 
-pulseCircleGUI :: GtkGUI PulseCircle () -> PixSize -> GtkGUI PulseCircle ()
-pulseCircleGUI ctxSwitch initSize@(V2 (SampCoord w) (SampCoord h)) = do
+pulseCircleGUI :: TestSuite -> PixSize -> GtkGUI PulseCircle ()
+pulseCircleGUI ctx initSize@(V2 (SampCoord w) (SampCoord h)) = do
   -- Initialize the model such that the circle is placed in the middle of the window.
   pulseCirclePosition .= V2 (realToFrac w / 2) (realToFrac h / 2)
   pulseCircleWindowSize .= initSize
@@ -115,8 +123,8 @@ pulseCircleGUI ctxSwitch initSize@(V2 (SampCoord w) (SampCoord h)) = do
             circle newXY           newR        0.0  0.0  1.0  1.0
 
   -- Install the mouse event handling function.
-  mouseEvents MouseDrag $ \ (Mouse _ _ _ button newXY) -> case button of
-    RightClick -> ctxSwitch
+  mouseEvents MouseDrag $ \ (Mouse _ down _ button newXY) -> when down $ case button of
+    RightClick -> switchToRedGrid ctx
     _          -> do
       old <- get
       pulseCirclePosition .= (realToFrac <$> newXY)
