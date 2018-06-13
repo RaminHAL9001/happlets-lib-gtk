@@ -1,3 +1,5 @@
+{-# LANGUAGE CPP #-}
+
 -- | This is the Gtk+ version 2 back-end for Happlets, and will also serve as the Happlet referecne
 -- implementation. Creating a window automatically calls the the Gtk+ initializer. Use
 -- 'newGtkWindow' to create a new window, and any of the "Happlet.World" functinos to manipulate the
@@ -13,6 +15,18 @@ module Happlets.Lib.Gtk
   )
   where
 
+-- I have found that it is probably better to do double-buffering of the canvas by using a Cairo
+-- Surface, however there is a way to make use of a Gtk+ Pixmap as a double-buffer instead. Both
+-- ways have been encoded in this source file, because I am not sure which is really the most
+-- portable, or which is the most efficient.
+#define USE_CAIRO_SURFACE_BUFFER 1
+
+-- I am still not sure how to manipulate the event masks properly. I do not know whether it is
+-- better to capture events by installing mouse and keyboard event handlers into a Gtk+ EventBox, or
+-- to install event handlers directly into the Gtk+ Window object. I have encoded both ways of event
+-- captuere into this source file in case I need to switch to one or the other.
+#define USE_EVENT_BOX            0
+
 ----------------------------------------------------------------------------------------------------
 
 import           Happlets
@@ -27,7 +41,6 @@ import           Data.Maybe
 import           Data.Semigroup
 import qualified Data.Text         as Strict
 import           Data.Time.Clock
-import           Data.Word
 
 import qualified Graphics.Rendering.Cairo           as Cairo
 
@@ -36,12 +49,18 @@ import qualified Graphics.UI.Gtk.Cairo              as Gtk
 import qualified Graphics.UI.Gtk.Gdk.Drawable       as Gtk
 import qualified Graphics.UI.Gtk.Gdk.DrawWindow     as Gtk
 import qualified Graphics.UI.Gtk.Gdk.EventM         as Gtk
-import qualified Graphics.UI.Gtk.Gdk.GC             as Gtk
-import qualified Graphics.UI.Gtk.Gdk.Pixmap         as Gtk
 import qualified Graphics.UI.Gtk.Gdk.Region         as Gtk
 import qualified Graphics.UI.Gtk.Gdk.Screen         as Gtk
 import qualified Graphics.UI.Gtk.General.General    as Gtk
 import qualified Graphics.UI.Gtk.Windows.Window     as Gtk
+
+#if USE_EVENT_BOX
+import           Data.Word
+import qualified Graphics.UI.Gtk.Abstract.Container as Gtk
+import qualified Graphics.UI.Gtk.Gdk.GC             as Gtk
+import qualified Graphics.UI.Gtk.Gdk.Pixmap         as Gtk
+import qualified Graphics.UI.Gtk.Misc.EventBox      as Gtk
+#endif
 
 import           Diagrams.Backend.Cairo.Internal
 import           Diagrams.BoundingBox
@@ -77,33 +96,35 @@ mkLogger func enable = return $ if not (debugThisModule && enable)
     tid <- myThreadId
     traceIO $ '[' : show tid ++ "][Happlets.Lib.Gtk." ++ func ++ "] " ++ msg
 
-logModMVar :: LogGUI -> MVar a -> (a -> IO (a, b)) -> IO b
-logModMVar logGUI mvar f = do
-  logGUI $ "modifyMVar -- begin"
+logModMVar :: LogGUI -> String -> MVar a -> (a -> IO (a, b)) -> IO b
+logModMVar logGUI label mvar f = do
+  logGUI $ "modifyMVar " ++ label ++ " -- begin"
   b <- modifyMVar mvar f
-  logGUI $ "modifyMVar -- end"
+  logGUI $ "modifyMVar " ++ label ++ " -- end"
   return b
 
-logModMVar_ :: LogGUI -> MVar a -> (a -> IO a) -> IO ()
-logModMVar_ logGUI mvar f = do
-  logGUI $ "modifyMVar_ -- begin"
+logModMVar_ :: LogGUI -> String -> MVar a -> (a -> IO a) -> IO ()
+logModMVar_ logGUI label mvar f = do
+  logGUI $ "modifyMVar_ " ++ label ++ " -- begin"
   modifyMVar_ mvar f
-  logGUI $ "modifyMVar_ -- end"
+  logGUI $ "modifyMVar_ " ++ label ++ " -- end"
 
-logWithMVar :: LogGUI -> MVar a -> (a -> IO b) -> IO b
-logWithMVar logGUI mvar f = do
-  logGUI $ "withMVar -- begin"
+logWithMVar :: LogGUI -> String -> MVar a -> (a -> IO b) -> IO b
+logWithMVar logGUI label mvar f = do
+  logGUI $ "withMVar " ++ label ++ " -- begin"
   b <- withMVar mvar f
-  logGUI $ "withMVar -- end"
+  logGUI $ "withMVar " ++ label ++ " -- end"
   return b
 
 ----------------------------------------------------------------------------------------------------
 
+#if ! USE_CAIRO_SURFACE_BUFFER
 dToW16 :: Double -> Word16
 dToW16 = round . (*) (realToFrac (maxBound::Word16))
 
 dToGrey :: Double -> Gtk.Color
 dToGrey d = Gtk.Color (dToW16 d) (dToW16 d) (dToW16 d)
+#endif
 
 -- | This is the frame rate used by default when installing an animation event handler. This value
 -- can be configured by modifying the 'Happlets.Config.animationFrameRate'.
@@ -111,19 +132,6 @@ gtkAnimationFrameRate :: Double
 gtkAnimationFrameRate = 60.0
 
 ----------------------------------------------------------------------------------------------------
-
--- | This data type acts as a handle to a Gtk+ environment, which contains pointers to the window
--- and graphpics contexts which you can manipulate by inserting or removing your own Happlets to be
--- displayed within it.
-data GtkWindow
-  = GtkUnlockedWin !(MVar GtkWindowState)
-    -- ^ This is the constructor used by public-facing APIs. The 'Happlets.Initialize.newWindow'
-    -- 'Happlets.Initialize.deleteWindow', and 'Happlets.Initialize.attachWindow' functions all
-    -- return or pass this constructor around.
-  | GtkLockedWin   !(GtkWindowState)
-    -- ^ This is the constructor use internally, particularly when evaluating the 'Happlets.GUI.GUI'
-    -- monad. When evaluation completes, it is stored back into the MVar for 'GtkUnlockedWin' and the
-    -- 'GtkUnlockedWin' is returned instead.
 
 -- | A monadic wrapper around a 'Cario.Render' monad. The only reason for this to exist is because
 -- there needs to be an instance of 'Data.Semigroup.Semigroup'.
@@ -140,6 +148,21 @@ instance Monoid a => Monoid (CairoRender a) where
   mappend (CairoRender a) (CairoRender b) = CairoRender $ mappend <$> a <*> b
   mempty = return mempty
 
+----------------------------------------------------------------------------------------------------
+
+-- | This data type acts as a handle to a Gtk+ environment, which contains pointers to the window
+-- and graphpics contexts which you can manipulate by inserting or removing your own Happlets to be
+-- displayed within it.
+data GtkWindow
+  = GtkUnlockedWin !(MVar GtkWindowState)
+    -- ^ This is the constructor used by public-facing APIs. The 'Happlets.Initialize.newWindow'
+    -- 'Happlets.Initialize.deleteWindow', and 'Happlets.Initialize.attachWindow' functions all
+    -- return or pass this constructor around.
+  | GtkLockedWin   !(GtkWindowState)
+    -- ^ This is the constructor use internally, particularly when evaluating the 'Happlets.GUI.GUI'
+    -- monad. When evaluation completes, it is stored back into the MVar for 'GtkUnlockedWin' and the
+    -- 'GtkUnlockedWin' is returned instead.
+
 -- | Contains parameters that can exist /after/ the 'Gtk.Window' has been allocated. These
 -- parameters are stored in an 'MVar' which is initialized in an empty state until the Gtk+ window
 -- is actually made visible (when it recieves the first "configure" event). The reason for this is
@@ -147,19 +170,28 @@ instance Monoid a => Monoid (CairoRender a) where
 -- exists and the DrawWIndow has been allocated.
 data GtkWindowLive
   = GtkWindowLive
-    { gtkDrawWindow  :: !Gtk.DrawWindow
-    , theGtkPixmap   :: !Gtk.Pixmap
+    { gtkDrawWindow   :: !Gtk.DrawWindow
+#if USE_CAIRO_SURFACE_BUFFER
+    , theCairoSurface :: !Cairo.Surface
+      -- ^ This is the 'Cairo.Surface' that contains the buffer of the image that is displayed in
+      -- the Happlet window. Every time the window is resized, this object is re-allocated, so it is
+      -- important that this value be accessible in only one location, do not store a copy of it
+      -- into an MVar or IORef which other threads my write to arbitrarily, unless you like the
+      -- image to be garbled.
+#else
+    , theGtkPixmap    :: !Gtk.Pixmap
       -- ^ This is the 'Gtk.Pixmap' that contains the buffer of the image that is displayed in the
       -- Happlet window. Every time the window is resized, this object is re-allocated, so it is
       -- important that this value be accessible in only one location, do not store a copy of it
       -- into an MVar or IORef which other threads may write to arbitrarily, unless you like the
       -- image to be garbled.
-    , theGtkGraphCtx :: !Gtk.GC
+    , theGtkGraphCtx  :: !Gtk.GC
       -- ^ This is the old-fashioned GUI graphics context, which keeps track of things like
       -- foreground color, background color, clip region, and pen location. This is used for Gdk
       -- (not Gtk+) drawing primitives. As far as I know, this data structure is deprecated and does
       -- not even exist in Gtk+ version 3, but it is still the only way to perform certain
       -- graphics operations in Gtk+ version 2.
+#endif
     }
 
 data GtkWindowState
@@ -176,11 +208,19 @@ data GtkWindowState
     , theCursorHandler      :: !(ConnectReact Mouse)
     , theKeyHandler         :: !(ConnectReact Keyboard)
     , theAnimatorThread     :: !(ConnectReact AnimationMoment)
+#if USE_EVENT_BOX
+    , gtkEventBox           :: !Gtk.EventBox
+#endif
     }
 
 data ConnectReact event
   = Disconnected
   | ConnectReact{ doDisconnect :: GtkState (), doReact :: event -> GtkState Bool }
+
+#if ! USE_EVENT_BOX
+gtkEventBox :: GtkWindowState -> Gtk.Window
+gtkEventBox = gtkWindow
+#endif
 
 evalConnectReact :: ConnectReact event -> event -> GtkState Bool
 evalConnectReact = \ case
@@ -191,12 +231,6 @@ forceDisconnect :: Lens' GtkWindowState (ConnectReact event) -> GtkState ()
 forceDisconnect connection = use connection >>= \ case
   ConnectReact{doDisconnect=discon} -> discon >> connection .= Disconnected
   Disconnected -> return ()
-
---gtkPixmap :: Lens' GtkWindowLive Gtk.Pixmap
---gtkPixmap = lens theGtkPixmap $ \ a b -> a{ theGtkPixmap = b }
-
---gtkGraphCtx :: Lens' GtkWindowLive Gtk.GC
---gtkGraphCtx = lens theGtkGraphCtx $ \ a b -> a{ theGtkGraphCtx = b }
 
 initReaction :: Lens' GtkWindowState (ConnectReact PixSize)
 initReaction = lens theInitReaction $ \ a b -> a{ theInitReaction = b }
@@ -238,9 +272,6 @@ mkAlphaChannel logGUI window = do
       logGUI $ "Gtk.widgetSetColorMap"
       Gtk.widgetSetColormap window colormap
 
---gtkCanvas :: GtkState Gtk.DrawWindow
---gtkCanvas = gets gtkWindowLive >>= liftIO . liftM gtkDrawWindow . readMVar
-
 ----------------------------------------------------------------------------------------------------
 
 newtype GtkState a
@@ -270,7 +301,8 @@ runGtkState (GtkState f) = runStateT f
 lockGtkWindow :: LogGUI -> GtkWindow -> GtkState a -> IO a
 lockGtkWindow logGUI win f = case win of
   GtkLockedWin{} -> error "lockGtkWindow: evaluated on an already locked 'GtkLockedWin' window."
-  GtkUnlockedWin mvar -> logModMVar logGUI mvar $ liftM (\ (a, b) -> (b, a)) . runGtkState f
+  GtkUnlockedWin mvar -> logModMVar logGUI "GtkUnlockedWin" mvar $
+    liftM (\ (a, b) -> (b, a)) . runGtkState f
 
 -- | This function evaluates 'Happlets.GUI.GUI' functions within event handlers. It evaluates to a
 -- 'GtkState' function, which means you are required to have first evaluated 'unlockGtkWindow'. This
@@ -342,6 +374,14 @@ createWin cfg = do
   uncurry (Gtk.windowSetDefaultSize window) $ cfg ^. recommendWindowSize
   logGUI $ "Gtk.windowSetDecorated " ++ show (cfg ^. decorateWindow)
   Gtk.windowSetDecorated window $ cfg ^. decorateWindow
+#if USE_EVENT_BOX
+  logGUI $ "Gtk.eventBoxNew"
+  eventBox <- Gtk.eventBoxNew
+  logGUI $ "Gtk.eventBoxSetVisibleWindow eventBox false"
+  Gtk.eventBoxSetVisibleWindow eventBox False
+  logGUI $ "Gtk.containerAdd window eventBox"
+  Gtk.containerAdd window eventBox
+#endif
   this <- newEmptyMVar
   live <- newEmptyMVar
   let env = GtkWindowState
@@ -349,7 +389,6 @@ createWin cfg = do
         , thisWindow            = this
         , gtkWindowLive         = live
         , gtkWindow             = window
---        , gtkEventBox           = eventBox
         , theInitReaction       = Disconnected
         , theResizeReaction     = Disconnected
         , theVisibilityReaction = Disconnected
@@ -358,6 +397,9 @@ createWin cfg = do
         , theCursorHandler      = Disconnected
         , theKeyHandler         = Disconnected
         , theAnimatorThread     = Disconnected
+#if USE_EVENT_BOX
+        , gtkEventBox           = eventBox
+#endif
         }
   ((), env) <- flip runGtkState env $ do
     installExposeEventHandler
@@ -396,12 +438,30 @@ installExposeEventHandler = do
           logGUI <- mkLogger "exposeEventCallback" False
           canvas <- Gtk.eventWindow
           region <- Gtk.eventRegion
-          liftIO $ logWithMVar logGUI (gtkWindowLive env) $ \ livest -> do
+          liftIO $ logWithMVar logGUI "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
+#if USE_CAIRO_SURFACE_BUFFER
+            Gtk.renderWithDrawable canvas $ do
+              let surf = theCairoSurface livest
+              --w <- Cairo.imageSurfaceGetWidth  surf
+              --h <- Cairo.imageSurfaceGetHeight surf
+              liftIO $ logGUI $ "Cairo.setSourceSurface buffer"
+              Cairo.setSourceSurface surf  0.0  0.0
+              liftIO (Gtk.regionGetRectangles region) >>= mapM_
+                (\ (Gtk.Rectangle x y w h) -> do
+                  let f = realToFrac :: Int -> Double
+                  liftIO $ logGUI $ unwords
+                    ["Cairo.rectangle", show x, show y, show w, show h, ">> Cairo.paint"]
+                  Cairo.setOperator Cairo.OperatorSource
+                  Cairo.rectangle (f x) (f y) (f w) (f h)
+                  Cairo.paint
+                )
+#else
+            logGUI $ "Gtk.gcSetClipRegion"
             Gtk.gcSetClipRegion (theGtkGraphCtx livest) region
             (w, h) <- Gtk.drawableGetSize (theGtkPixmap livest)
-            logGUI $ "Gtk.drawRectangle 0 0 " ++ show w ++ ' ' : show h
+            logGUI $ unwords ["Gtk.drawRectangle 0 0", show w, show h]
             Gtk.drawRectangle canvas (theGtkGraphCtx livest) True 0 0 w h
-            --liftIO $ gdkBlit canvas (theGtkGraphCtx env) (V2 0 0) region >> return True
+#endif
           return True
         ------------------------------------------------------------------------------------
         return True
@@ -526,8 +586,15 @@ resizeGtkDrawContext canvas size = do
   env <- get
   let cfg = currentConfig env
   let newDims = dimsForAlloc size
-  liftIO $ logModMVar_ logGUI (gtkWindowLive env) $ \ livest -> do
+  liftIO $ logModMVar_ logGUI "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
+#if USE_CAIRO_SURFACE_BUFFER
+    let surface = theCairoSurface livest
+    oldDims <- (,)
+      <$> Cairo.imageSurfaceGetWidth  surface
+      <*> Cairo.imageSurfaceGetHeight surface
+#else
     oldDims <- Gtk.drawableGetSize (theGtkPixmap livest)
+#endif
     if newDims == oldDims
      then do
       logGUI $ "-- will not re-allocate window buffer, old buffer size = " ++
@@ -541,21 +608,33 @@ resizeGtkDrawContext canvas size = do
 -- context. The buffer allocated will be exactly the dimensions given without checking if the size
 -- is valid, and invalid demensions will crash the thread.
 newGtkWindowLive :: Config -> Gtk.DrawWindow -> (Int, Int) -> IO GtkWindowLive
-newGtkWindowLive cfg canvas size@(w, h) = do
+newGtkWindowLive cfg canvas (w, h) = do
   logGUI <- mkLogger "gtkAllocNewPixmap" True
-  let depth = Just $ if isJust $ cfg ^. backgroundTransparency then 32 else 24
+#if USE_CAIRO_SURFACE_BUFFER
+  let depth = if isJust $ cfg ^. backgroundTransparency
+        then Cairo.FormatARGB32
+        else Cairo.FormatRGB24
+  logGUI $ unwords ["Cairo.createImageSurface", show depth, show w, show h]
+  surface <- Cairo.createImageSurface depth w h
+#else
   let grey  = cfg ^. backgroundGreyValue
-  logGUI $ "Gtk.pixmapNew " ++ show size ++ ' ' : show depth
+  let depth = Just $ if isJust $ cfg ^. backgroundTransparency then 32 else 24
+  logGUI $ "Gtk.pixmapNew " ++ show (w, h) ++ ' ' : show depth
   pixmap <- Gtk.pixmapNew (Just canvas) w h depth
   gc <- liftIO $ Gtk.gcNewWithValues canvas Gtk.newGCValues
     { Gtk.background = dToGrey grey
     , Gtk.tile       = Just pixmap
     , Gtk.fill       = Gtk.Tiled
     }
+#endif
   return GtkWindowLive
-    { gtkDrawWindow = canvas
-    , theGtkPixmap = pixmap
-    , theGtkGraphCtx = gc
+    { gtkDrawWindow   = canvas
+#if USE_CAIRO_SURFACE_BUFFER
+    , theCairoSurface = surface
+#else
+    , theGtkPixmap    = pixmap
+    , theGtkGraphCtx  = gc
+#endif
     }
 
 disconnectAll :: GtkState ()
@@ -654,12 +733,17 @@ evalRedraw :: (PixSize -> CairoRender a) -> GtkState a
 evalRedraw redraw = do
   logGUI <- mkLogger "evalRedraw" True
   env <- get
-  liftIO $ logWithMVar logGUI (gtkWindowLive env) $ \ livest -> do
+  liftIO $ logWithMVar logGUI "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
     -- Obtain the size from the draw window, but will not draw to the draw window.
-    size <- fmap sampCoord . uncurry V2 <$> Gtk.drawableGetSize (gtkDrawWindow livest)
+    (w, h) <- Gtk.drawableGetSize (gtkDrawWindow livest)
+    let size = V2 (sampCoord w) (sampCoord h)
+#if USE_CAIRO_SURFACE_BUFFER
+    logGUI $ "Cairo.renderWith"
+    a <- Cairo.renderWith (theCairoSurface livest) $ runCairoRender $ redraw size
+#else
     logGUI "Gtk.renderWithDrawable -- to theGtkPixmap"
     a <- Gtk.renderWithDrawable (theGtkPixmap livest) $ runCairoRender $ redraw size
-    (w, h) <- Gtk.drawableGetSize (gtkDrawWindow livest)
+#endif
     region <- Gtk.regionRectangle $ Gtk.Rectangle 0 0 w h
     logGUI "Gtk.drawWindowInvalidateRegion"
     Gtk.drawWindowInvalidateRegion (gtkDrawWindow livest) region True
@@ -819,12 +903,12 @@ instance CanAnimate GtkWindow where
 
 instance CanKeyboard GtkWindow where
   keyboardEvents = installEventHandler "keyboardEvents" keyHandler $ \ logGUI env next -> do
-    let win = gtkWindow env
+    let box = gtkEventBox env
     logGUI "Glib.on Gtk.keyReleaseEvent"
-    press   <- Glib.on win Gtk.keyReleaseEvent $
+    press   <- Glib.on box Gtk.keyReleaseEvent $
       handleKey False >>= liftIO . next >> return False
     logGUI "Glib.on Gtk.keyPressEvent"
-    release <- Glib.on win Gtk.keyPressEvent $
+    release <- Glib.on box Gtk.keyPressEvent $
       handleKey True  >>= liftIO . next >> return False
     return $ do
       logGUI "Glib.signalDisconnect Gtk.keyReleaseEvent"
@@ -835,29 +919,29 @@ instance CanMouse GtkWindow where
   providedMouseDevices = return []
   mouseEvents = \ case
     MouseButton -> installEventHandler "mouseButtonEvents" mouseHandler $ \ logGUI env next -> do
-      let win = gtkWindow env
+      let box = gtkEventBox env
       logGUI "Glib.on Gtk.buttonPressEvent"
-      press <- Glib.on win Gtk.buttonPressEvent $
+      press <- Glib.on box Gtk.buttonPressEvent $
         handleMouse True >>= liftIO . next >> return False
-      release <- Glib.on win Gtk.buttonReleaseEvent $
+      release <- Glib.on box Gtk.buttonReleaseEvent $
         handleMouse False >>= liftIO . next >> return False
       return $ do
         logGUI "Glib.signalDisconnect Gtk.buttonPressEvent"
         Glib.signalDisconnect press
         Glib.signalDisconnect release
     MouseDrag   -> installEventHandler "mouseDragEvents" mouseHandler $ \ logGUI env next -> do
-      let win = gtkWindow env
+      let box = gtkEventBox env
       logGUI "Glib.on Gtk.buttonPressEvent"
-      press <- Glib.on win Gtk.buttonPressEvent $
+      press <- Glib.on box Gtk.buttonPressEvent $
         handleMouse True >>= liftIO . next >> return False
       logGUI "Glib.on Gtk.buttonReleaseEvent"
-      release <- Glib.on win Gtk.buttonReleaseEvent $
+      release <- Glib.on box Gtk.buttonReleaseEvent $
         handleMouse False >>= liftIO . next >> return False
       logGUI "Glib.on Gtk.motionNotifyEvent"
-      button <- Glib.on win Gtk.motionNotifyEvent $
+      button <- Glib.on box Gtk.motionNotifyEvent $
         handleCursor True >>= liftIO . next >> return False
       logGUI "Gtk.widgetAddEvents [Gtk.ButtonMotionMask]"
-      Gtk.widgetAddEvents win [Gtk.ButtonMotionMask]
+      Gtk.widgetAddEvents box [Gtk.ButtonMotionMask]
       return $ do
         -- NOTE that you cannot call 'Gtk.widgetDelEvents' unless the widget is not realized. Doing
         -- so results in an assertion error being thrown in the log file. I assume the previous
@@ -867,20 +951,20 @@ instance CanMouse GtkWindow where
         Glib.signalDisconnect release
         Glib.signalDisconnect button
     MouseAll    -> installEventHandler "mouseAllEvents" mouseHandler $ \ logGUI env next -> do
-      let win = gtkWindow env
+      let box = gtkEventBox env
       logGUI "Glib.on Gtk.motionNotifyEvent"
       button  <- newIORef False
-      press   <- Glib.on win Gtk.buttonPressEvent   $
+      press   <- Glib.on box Gtk.buttonPressEvent   $
         liftIO (writeIORef button False) >>
         handleMouse True  >>= liftIO . next >> return False
-      release <- Glib.on win Gtk.buttonReleaseEvent $
+      release <- Glib.on box Gtk.buttonReleaseEvent $
         liftIO (writeIORef button True) >>
         handleMouse False >>= liftIO . next >> return False
-      motion  <- Glib.on win Gtk.motionNotifyEvent  $
+      motion  <- Glib.on box Gtk.motionNotifyEvent  $
         liftIO (readIORef button) >>=
         handleCursor >>= liftIO . next >> return False
       logGUI "Gtk.widgetAddEvents [Gtk.PointerMotionMask, Gtk.ButtonMotionMask]"
-      Gtk.widgetAddEvents win [Gtk.PointerMotionMask, Gtk.ButtonMotionMask]
+      Gtk.widgetAddEvents box [Gtk.PointerMotionMask, Gtk.ButtonMotionMask]
       return $ do
         -- NOTE that you cannot call 'Gtk.widgetDelEvents' unless the widget is not realized. Doing
         -- so results in an assertion error being thrown in the log file. I assume the previous
@@ -1030,6 +1114,7 @@ packGtkModifiers = packModifiers .
 --  logGUI "Gtk.drawWindowInvalidateRegion"
 --  Gtk.drawWindowInvalidateRegion canvas region True
 
+#if ! USE_CAIRO_SURFACE_BUFFER
 -- | Blit a 'Gtk.Pixmap' to some drawable canvas.
 gdkBlit :: Gtk.DrawableClass canvas => canvas -> Gtk.Pixmap -> PixCoord -> IO ()
 --gdkBlit :: Gtk.DrawableClass canvas => canvas -> Gtk.Pixmap -> PixCoord -> [ScreenMask] -> IO ()
@@ -1055,6 +1140,7 @@ gdkBlit canvas pixmap (V2 dx dy)  = do
   --forM_ rects $ \ rect@(Gtk.Rectangle x y w h) -> do
   --  logGUI $ "Gtk.drawRectangle canvas gc True (" ++ show rect ++ ")"
   --  Gtk.drawRectangle canvas gc True (x + fromIntegral dx) (y + fromIntegral dy) w h
+#endif
 
 ----------------------------------------------------------------------------------------------------
 
@@ -1070,10 +1156,71 @@ type GtkRedraw a = CairoRender a
 -- perform some drawing to the pixel values.
 data GtkImage
   = GtkImage
-    { gtkPixmapMVar :: MVar Gtk.Pixmap
+    {
+#if USE_CAIRO_SURFACE_BUFFER
+      gtkCairoSurfaceMVar :: MVar Cairo.Surface
+#else
+      gtkPixmapMVar :: MVar Gtk.Pixmap
+#endif
     }
 
 instance CanBufferImages GtkWindow GtkImage CairoRender where
+#if USE_CAIRO_SURFACE_BUFFER
+  newImageBuffer (V2 w h) (CairoRender draw) = liftIO $ do
+    logGUI <- mkLogger "newImageBuffer" True
+    logGUI $ unwords ["Cairo.createImageSurface Cairo.FormatARGB32", show w, show h]
+    surface <- Cairo.createImageSurface Cairo.FormatARGB32 (fromIntegral w) (fromIntegral h)
+    logGUI $ "Cairo.renderWith draw"
+    Cairo.renderWith surface draw
+    mvar <- newMVar surface
+    return GtkImage{gtkCairoSurfaceMVar=mvar}
+
+  resizeImageBuffer (GtkImage{gtkCairoSurfaceMVar=mvar}) (V2 w h) (CairoRender draw) = liftIO $ do
+    logGUI <- mkLogger "resizeImageBuffer" True
+    logModMVar logGUI "gtkCairoSurfaceMVar" mvar $ \ surface -> do
+      oldDims <- (,)
+        <$> Cairo.imageSurfaceGetWidth  surface
+        <*> Cairo.imageSurfaceGetHeight surface
+      let f (SampCoord a) = fromIntegral a
+      surface <- if oldDims == (f w, f h) then return surface else do
+        logGUI $ unwords ["Cairo.createImageSurface Cairo.FormatARGB32", show w, show h]
+        Cairo.createImageSurface Cairo.FormatARGB32 (fromIntegral w) (fromIntegral h)
+      logGUI $ "Cairo.renderWith draw"
+      a <- Cairo.renderWith surface draw
+      return (surface, a)
+
+  drawImage (GtkImage{gtkCairoSurfaceMVar=mvar}) (CairoRender draw) = liftIO $ do
+    logGUI <- mkLogger "drawImage" True
+    logWithMVar logGUI "gtkCairoSurfaceMVar" mvar $ \ surface -> do
+      logGUI "Cairo.renderWith draw"
+      Cairo.renderWith surface draw
+
+  blitImage (GtkImage{gtkCairoSurfaceMVar=mvar}) offset = runGtkStateGUI $ do
+    logGUI <- mkLogger "blitImage" True
+    liveMVar <- gets gtkWindowLive
+    liftIO $ logWithMVar logGUI "gtkWindowLive" liveMVar $ \ liveEnv -> do
+      logGUI "modifyMVar gtkCairoSurfaceMVar -- begin"
+      logWithMVar logGUI "gtkCairoSurfaceMVar" mvar $ \ surface -> do
+        Cairo.renderWith (theCairoSurface liveEnv) $ do
+          let (V2 x y) = realToFrac <$> offset
+          liftIO $ logGUI $ unwords ["Cairo.setSourceSurface", show x, show y, ">> Cairo.paint"]
+          Cairo.setOperator Cairo.OperatorSource
+          Cairo.setSourceSurface surface x y
+          Cairo.paint
+
+  blitImageTo (GtkImage{gtkCairoSurfaceMVar=src}) (GtkImage{gtkCairoSurfaceMVar=targ}) offset = do
+    liftIO $ if src == targ then error "cannot blit image to itself" else do
+      logGUI <- mkLogger "blitImageTo" True
+      logWithMVar logGUI "blitSource" src $ \ src ->
+        logWithMVar logGUI "blitTarget" targ $ \ targ ->
+          Cairo.renderWith targ $ do
+            let (V2 x y) = realToFrac <$> offset
+            liftIO $ logGUI $ unwords ["Cairo.setSourceSurface", show x, show y, ">> Cairo.paint"]
+            Cairo.setOperator Cairo.OperatorSource
+            Cairo.setSourceSurface src x y
+            Cairo.paint
+
+#else
   newImageBuffer  (V2 (SampCoord w) (SampCoord h)) (CairoRender draw) = liftIO $ do
     pixmap <- Gtk.pixmapNew (Nothing :: Maybe Gtk.Pixmap)
       (fromIntegral w) (fromIntegral h) (Just 32)
@@ -1104,6 +1251,7 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
     logGUI <- mkLogger "blitImageTo" True
     liftIO $ logWithMVar logGUI src $ \ src -> logWithMVar logGUI targ $ \ targ ->
       gdkBlit targ src offset
+#endif
 
 -- | This is a helpful function you can use for your 'Happlet.Control.controlRedraw' function to clear
 -- the window with a background color, given by the four 'Prelude.Double' parameters for Red, Green,
@@ -1179,7 +1327,7 @@ gtkInit = do
     logGUI <- mkLogger "gtkInit" True
     logGUI "Gtk.initGUI"
     Gtk.initGUI >>= mapM_ logGUI
-    logModMVar_ logGUI gtkInitCheck $ return . const True
+    logModMVar_ logGUI "gtkInitCheck" gtkInitCheck $ return . const True
 
 -- | Launch the Gtk+ main event loop. This function is usually called via the
 -- 'Happlets.Initialize.launchGUIEventLoop' function, which is automatically called by the
