@@ -5,11 +5,18 @@
 -- 'newGtkWindow' to create a new window, and any of the "Happlet.World" functinos to manipulate the
 -- windows. This module re-exports the "Happlets" module so it is not necessary to import both.
 module Happlets.Lib.Gtk
-  ( gtkHapplet, GtkGUI, GtkRedraw,
+  ( gtkHapplet, gtkAnimationFrameRate, GtkGUI, GtkRedraw,
     GtkWindow, gtkLaunchEventLoop,
-    GtkImage, CairoRender(..), GtkCairoDiagram, gtkCairoDiagram,
+    GtkImage,
+    -- * Cairo Wrapper Functions
+    -- | Functions that allow you to call directly into a "Graphics.Rendering.Cairo".'Cairo.Render'
+    -- function, but using point, line, and color values specified in the "Happlets.Draw"
+    -- sub-modules.
+    CairoRender, cairoRender, GtkCairoDiagram, gtkCairoDiagram,
     cairoClearCanvas, cairoSetColorRGBA32,
-    gtkAnimationFrameRate,
+    cairoDrawPath, cairoMoveTo, cairoLineTo, cairoDrawLine,
+    cairoDrawRect, cairoPreserve,
+    cairoFlush, cairoSetPoint, cairoGetPoint, cairoInvalidate,
     module Happlets,
     module Happlets.Draw
   )
@@ -36,11 +43,14 @@ import           Happlets.Provider
 import           Control.Arrow
 import           Control.Concurrent
 
+import           Data.Array.MArray
+import           Data.Bits (rotate)
 import           Data.IORef
 import           Data.Maybe
 import           Data.Semigroup
 import qualified Data.Text         as Strict
 import           Data.Time.Clock
+import           Data.Word
 
 import qualified Graphics.Rendering.Cairo           as Cairo
 
@@ -138,7 +148,7 @@ gtkAnimationFrameRate = 60.0
 --
 -- The 'Controller' type is defined to use the 'CairoRender' as it's @view@ type. You can also
 -- convert a 'GtkCairoDiagram' to a 'CairoRender' using the 'gtkCairoDiagram' function.
-newtype CairoRender a = CairoRender { runCairoRender :: Cairo.Render a }
+newtype CairoRender a = CairoRender (StateT CairoRenderState Cairo.Render a)
   deriving (Functor, Applicative, Monad, MonadIO)
 
 instance Semigroup a => Semigroup (CairoRender a) where
@@ -147,6 +157,46 @@ instance Semigroup a => Semigroup (CairoRender a) where
 instance Monoid a => Monoid (CairoRender a) where
   mappend (CairoRender a) (CairoRender b) = CairoRender $ mappend <$> a <*> b
   mempty = return mempty
+
+-- | Mose Cairo commands work in 'VectorMode' where no special state is necessary. But the
+-- 'Happlets.Draw.setPoint' and 'Happlets.Draw.getPoint' commands operate in 'RasterMode', where the
+-- vector operations need to be flushed before beginning, and where the updated pixels need to be
+-- marked before returning to 'VectorMode'.
+data CairoRenderState
+  = VectorMode
+  | RasterMode !(V2 Double) !(V2 Double)
+
+-- | Lift a @"Graphics.Rendering.Cairo".'Cairo.Render'@ function type into the 'CairoRender'
+-- function type.
+cairoRender :: Cairo.Render a -> CairoRender a
+cairoRender = CairoRender . lift
+
+-- | Extract a @"Graphics.Rendering.Cairo".'Cairo.Render'@ from a 'CairoRender' function type.
+runCairoRender :: CairoRender a -> Cairo.Render a
+runCairoRender (CairoRender f) = evalStateT f VectorMode
+
+-- | Switch to vector mode (only if it isn't already) which marks the surface as "dirty" in the
+-- smallest possible rectangle containing all points. This function is called before every vector
+-- operation.
+vectorMode :: CairoRender ()
+vectorMode = CairoRender $ get >>= \ case
+  VectorMode       -> return ()
+  RasterMode lo hi -> do
+    let (V2 loX loY) = round <$> lo
+        (V2 hiX hiY) = round <$> hi
+    lift $ Cairo.withTargetSurface $ \ surface ->
+      Cairo.surfaceMarkDirtyRectangle surface loX loY (hiX - loX + 1) (hiY - loY + 1)
+    put VectorMode
+
+-- | Switch to raster mode (only if it isn't already) which flushs all pending vector events. This
+-- function is called before every raster operation.
+rasterMode :: Double -> Double -> CairoRender ()
+rasterMode x y = CairoRender $ get >>= \ case
+  RasterMode (V2 loX loY) (V2 hiX hiY) -> do
+    put $ RasterMode (V2 (min loX x) (min loY y)) (V2 (max hiX x) (max hiY y))
+  VectorMode                           -> do
+    lift cairoFlush
+    put $ RasterMode (V2 x y) (V2 x y)
 
 ----------------------------------------------------------------------------------------------------
 
@@ -756,61 +806,119 @@ instance HappletWindow GtkWindow CairoRender where
   onView = runGtkStateGUI . evalRedraw
 
 instance Happlet2DGraphics CairoRender where
-  clearScreen = unpackRGBA32Color >>> \ (r,g,b,a) -> CairoRender $ cairoClearCanvas r g b a
-  drawLine = cairoDrawLine
-  drawPath = cairoDrawPath
-  drawRect = cairoDrawRect
-  setPoint = error "TODO: canvasSetPoint has not yet been implemented in this Happlets back-end"
-  getPoint = error "TODO: canvasGetPoint has not yet been implemented in this Happlets back-end"
+  clearScreen = unpackRGBA32Color >>> \ (r,g,b,a) -> cairoRender $ cairoClearCanvas r g b a
+  drawLine a b c   = vectorMode >> cairoRender (cairoDrawLine a b c)
+  drawPath a b c   = vectorMode >> cairoRender (cairoDrawPath a b c)
+  drawRect a b c d = vectorMode >> cairoRender (cairoDrawRect a b c d)
+  getPoint a       = cairoRender (cairoFlush >> cairoGetPoint a)
+  setPoint a@(Point2D (V2 (RealApprox x) (RealApprox y))) b =
+    rasterMode x y >> cairoRender (cairoSetPoint a b)
+
+cairoArray :: (Int -> Int -> Cairo.SurfaceData Int Word32 -> IO a) -> Cairo.Render a
+cairoArray f = Cairo.withTargetSurface $ \ surface -> do
+  w <- Cairo.imageSurfaceGetWidth surface
+  h <- Cairo.imageSurfaceGetHeight surface
+  liftIO $ Cairo.imageSurfaceGetPixels surface >>= f w h
+
+pointToInt :: Int -> Int -> Point2D RealApprox -> Int
+pointToInt w _h pt = let (x, y) = (round <$> pt) ^. pointXY in y*w + x
+
+-- | The implementation of 'Happlets.Draw.getPoint' for the 'Cairo.Render' function type.
+cairoGetPoint :: Point2D RealApprox -> Cairo.Render PackedRGBA32
+cairoGetPoint pt = cairoArray $ \ w h surfaceData ->
+  liftIO $ PackedRGBA32 . (`rotate` 8) <$> readArray surfaceData (pointToInt w h pt)
+
+-- | Call this function at least once before calling 'cairoSetPoint'. Note that if you use a
+-- 'CairoRender' function type and the ordinary 'Happlets.Draw.setPoint' function in the
+-- "Happlets.Draw" module, this function never needs to be called, the internal state of the
+-- 'CairoRender' function tracks when to flush and when to invalidate.
+cairoFlush :: Cairo.Render ()
+cairoFlush = Cairo.withTargetSurface Cairo.surfaceFlush
+
+-- | Force a single pixel at a given location to change to the given color.
+cairoSetPoint :: Point2D RealApprox -> PackedRGBA32 -> Cairo.Render ()
+cairoSetPoint pt (PackedRGBA32 w32) = cairoArray $ \ w h surfaceData ->
+  liftIO $ writeArray surfaceData (pointToInt w h pt) $ rotate w32 (-8)
+
+-- | Call this function at least once after you have finished a series of calls to 'cairoSetPoint'
+-- but before any calls to any other cairo functions. Note that if you use a 'CairoRender' function
+-- type and the ordinary 'Happlets.Draw.setPoint' function in the "Happlets.Draw" module, this
+-- function never needs to be called, the internal state of the 'CairoRender' function tracks when
+-- to flush and when to invalidate.
+cairoInvalidate :: Cairo.Render ()
+cairoInvalidate = Cairo.withTargetSurface Cairo.surfaceMarkDirty
+
+-- | Use the Happlets-native color data type 'Happlets.Draw.Color.PackedRGBA32' to set the Cairo
+-- "source" color in the Cairo context.
+cairoSetColorRGBA32 :: PackedRGBA32 -> Cairo.Render ()
+cairoSetColorRGBA32 = unpackRGBA32Color >>> \ (r,g,b,a) -> Cairo.setSourceRGBA r g b a
 
 -- | Push the graphics context by calling 'Cairo.save' before evaluating a given 'Cario.Render'
 -- function. When evaluation completes, pop the graphics context by calling 'Cairo.restore'.
-cairoPreserve :: CairoRender a -> CairoRender a
-cairoPreserve f = CairoRender Cairo.save >> f <* CairoRender Cairo.restore
+cairoPreserve :: CairoRender a -> Cairo.Render a
+cairoPreserve f = Cairo.save >> runCairoRender f <* Cairo.restore
 
-cairoMoveTo :: Point2D RealApprox -> CairoRender ()
-cairoMoveTo = CairoRender . uncurry Cairo.moveTo . view pointXY . fmap unwrapRealApprox
+-- | Move the position of the cairo graphics context "pen" object.
+cairoMoveTo :: Point2D RealApprox -> Cairo.Render ()
+cairoMoveTo = uncurry Cairo.moveTo . view pointXY . fmap unwrapRealApprox
 
-cairoLineTo :: Point2D RealApprox -> CairoRender ()
-cairoLineTo = CairoRender . uncurry Cairo.lineTo . view pointXY . fmap unwrapRealApprox
+-- | Using the cairo graphics context current color, and the position of the "pen" object, draw a
+-- line from the current pen position to the given point.
+cairoLineTo :: Point2D RealApprox -> Cairo.Render ()
+cairoLineTo = uncurry Cairo.lineTo . view pointXY . fmap unwrapRealApprox
 
-cairoDrawLine :: LineColor -> LineWidth -> Line2D RealApprox -> CairoRender ()
-cairoDrawLine color width line = cairoPreserve $ do
-  CairoRender $ do
-    cairoSetColorRGBA32 color
-    Cairo.setLineCap Cairo.LineCapRound
-    Cairo.setLineWidth $ unwrapRealApprox width
+-- | Draw a single line of the given color. This will also draw the line caps at the start and end
+-- points.
+cairoDrawLine :: LineColor -> LineWidth -> Line2D RealApprox -> Cairo.Render ()
+cairoDrawLine color width line = cairoPreserve $ cairoRender $ do
+  cairoSetColorRGBA32 color
+  Cairo.setLineCap Cairo.LineCapRound
+  Cairo.setLineWidth $ unwrapRealApprox width
   cairoMoveTo $ line ^. line2DHead
   cairoLineTo $ line ^. line2DTail
-  CairoRender $ Cairo.stroke
+  Cairo.stroke
 
-cairoDrawPath :: LineColor -> LineWidth -> [Point2D RealApprox] -> CairoRender ()
+-- | Similar to 'cairoDrawLine' but draws multiple line segments, each next segment beginning where
+-- the previous segment ended. The line is drawn with the given color. Only two line caps are drawn:
+-- one at the first given point and one at the last given point in the list of points.
+cairoDrawPath :: LineColor -> LineWidth -> [Point2D RealApprox] -> Cairo.Render ()
 cairoDrawPath color width =
-  let run a ax = cairoPreserve $ do
-        CairoRender $ do
-          cairoSetColorRGBA32 color
-          Cairo.setLineCap Cairo.LineCapRound
-          Cairo.setLineWidth $ unwrapRealApprox width
-          Cairo.setLineJoin Cairo.LineJoinMiter
+  let run a ax = cairoPreserve $ cairoRender $ do
+        cairoSetColorRGBA32 color
+        Cairo.setLineCap Cairo.LineCapRound
+        Cairo.setLineWidth $ unwrapRealApprox width
+        Cairo.setLineJoin Cairo.LineJoinMiter
         cairoMoveTo a
         forM_ ax cairoLineTo
-        CairoRender Cairo.stroke
+        Cairo.stroke
   in  \ case { [] -> return (); [a] -> run a [a]; a:ax -> run a ax; }
 
-cairoDrawRect :: LineColor -> LineWidth -> FillColor -> Rect2D RealApprox -> CairoRender ()
-cairoDrawRect lineColor width fillColor rect = cairoPreserve $ do
-  CairoRender $ cairoSetColorRGBA32 fillColor
+cairoDrawRect :: LineColor -> LineWidth -> FillColor -> Rect2D RealApprox -> Cairo.Render ()
+cairoDrawRect lineColor width fillColor rect = cairoPreserve $ cairoRender $ do
+  cairoSetColorRGBA32 fillColor
   cairoMoveTo $ rect ^. rect2DHead
   let ((x0,y0),(x1,y1)) = view pointXY *** view pointXY $
         (unwrapRealApprox <$> rect) ^. rect2DPoints
-  CairoRender $ do
-    Cairo.rectangle x0 y0 x1 y1
-    Cairo.fill
-    cairoSetColorRGBA32 lineColor
-    Cairo.setLineWidth $ unwrapRealApprox width
-    Cairo.setLineJoin Cairo.LineJoinMiter
-    Cairo.rectangle x0 y0 x1 y1
-    Cairo.stroke
+  Cairo.rectangle x0 y0 x1 y1
+  Cairo.fill
+  cairoSetColorRGBA32 lineColor
+  Cairo.setLineWidth $ unwrapRealApprox width
+  Cairo.setLineJoin Cairo.LineJoinMiter
+  Cairo.rectangle x0 y0 x1 y1
+  Cairo.stroke
+
+-- | This is a helpful function you can use for your 'Happlet.Control.controlRedraw' function to clear
+-- the window with a background color, given by the four 'Prelude.Double' parameters for Red, Green,
+-- Blue, and Alpha (in that order).
+cairoClearCanvas :: Double -> Double -> Double -> Double -> Cairo.Render ()
+cairoClearCanvas r g b a = do
+  logGUI <- mkLogger "cairoClearCanvas" True
+  liftIO $ logGUI $ unwords $ show <$> [r,g,b,a]
+  op <- Cairo.getOperator
+  Cairo.setOperator Cairo.OperatorSource
+  Cairo.setSourceRGBA r g b a
+  Cairo.paint
+  Cairo.setOperator op
 
 --cairoSelectFont :: SelectFont -> GtkGUI model (Maybe FontExtents)
 --cairoSelectFont font0 = runGtkStateGUI $ evalCairo $ do
@@ -1166,16 +1274,16 @@ data GtkImage
 
 instance CanBufferImages GtkWindow GtkImage CairoRender where
 #if USE_CAIRO_SURFACE_BUFFER
-  newImageBuffer (V2 w h) (CairoRender draw) = liftIO $ do
+  newImageBuffer (V2 w h) draw = liftIO $ do
     logGUI <- mkLogger "newImageBuffer" True
     logGUI $ unwords ["Cairo.createImageSurface Cairo.FormatARGB32", show w, show h]
     surface <- Cairo.createImageSurface Cairo.FormatARGB32 (fromIntegral w) (fromIntegral h)
     logGUI $ "Cairo.renderWith draw"
-    Cairo.renderWith surface draw
+    Cairo.renderWith surface $ runCairoRender draw
     mvar <- newMVar surface
     return GtkImage{gtkCairoSurfaceMVar=mvar}
 
-  resizeImageBuffer (GtkImage{gtkCairoSurfaceMVar=mvar}) (V2 w h) (CairoRender draw) = liftIO $ do
+  resizeImageBuffer (GtkImage{gtkCairoSurfaceMVar=mvar}) (V2 w h) draw = liftIO $ do
     logGUI <- mkLogger "resizeImageBuffer" True
     logModMVar logGUI "gtkCairoSurfaceMVar" mvar $ \ surface -> do
       oldDims <- (,)
@@ -1186,14 +1294,14 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
         logGUI $ unwords ["Cairo.createImageSurface Cairo.FormatARGB32", show w, show h]
         Cairo.createImageSurface Cairo.FormatARGB32 (fromIntegral w) (fromIntegral h)
       logGUI $ "Cairo.renderWith draw"
-      a <- Cairo.renderWith surface draw
+      a <- Cairo.renderWith surface $ runCairoRender draw
       return (surface, a)
 
-  drawImage (GtkImage{gtkCairoSurfaceMVar=mvar}) (CairoRender draw) = liftIO $ do
+  drawImage (GtkImage{gtkCairoSurfaceMVar=mvar}) draw = liftIO $ do
     logGUI <- mkLogger "drawImage" True
     logWithMVar logGUI "gtkCairoSurfaceMVar" mvar $ \ surface -> do
       logGUI "Cairo.renderWith draw"
-      Cairo.renderWith surface draw
+      Cairo.renderWith surface $ runCairoRender draw
 
   blitImage (GtkImage{gtkCairoSurfaceMVar=mvar}) offset = runGtkStateGUI $ do
     logGUI <- mkLogger "blitImage" True
@@ -1221,25 +1329,25 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
             Cairo.paint
 
 #else
-  newImageBuffer  (V2 (SampCoord w) (SampCoord h)) (CairoRender draw) = liftIO $ do
+  newImageBuffer  (V2 (SampCoord w) (SampCoord h)) draw = liftIO $ do
     pixmap <- Gtk.pixmapNew (Nothing :: Maybe Gtk.Pixmap)
       (fromIntegral w) (fromIntegral h) (Just 32)
-    Gtk.renderWithDrawable pixmap draw
+    Gtk.renderWithDrawable pixmap $ runCairoRender draw
     mvar <- newMVar pixmap
     return GtkImage
       { gtkPixmapMVar = mvar
       }
 
-  resizeImageBuffer (GtkImage{gtkPixmapMVar=mvar}) (V2 w h) (CairoRender draw) = do
+  resizeImageBuffer (GtkImage{gtkPixmapMVar=mvar}) (V2 w h) draw = do
     logGUI <- mkLogger "resizeImageBuffer" True
     liftIO $ logModMVar logGUI mvar $ \ pixmap -> do
       pixmap <- Gtk.pixmapNew (Just pixmap) (fromIntegral w) (fromIntegral h) (Just 32)
-      a <- Gtk.renderWithDrawable pixmap draw
+      a <- Gtk.renderWithDrawable pixmap $ runCairoRender draw
       return (pixmap, a)
 
-  drawImage (GtkImage{gtkPixmapMVar=mvar}) (CairoRender draw) = do
+  drawImage (GtkImage{gtkPixmapMVar=mvar}) draw = do
     logGUI <- mkLogger "drawImage" True
-    liftIO $ logWithMVar logGUI mvar $ flip Gtk.renderWithDrawable draw
+    liftIO $ logWithMVar logGUI mvar $ flip Gtk.renderWithDrawable $ runCairoRender draw
 
   blitImage (GtkImage{gtkPixmapMVar=mvar}) offset = runGtkStateGUI $ do
     logGUI <- mkLogger "blitImage" True
@@ -1252,24 +1360,6 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
     liftIO $ logWithMVar logGUI src $ \ src -> logWithMVar logGUI targ $ \ targ ->
       gdkBlit targ src offset
 #endif
-
--- | This is a helpful function you can use for your 'Happlet.Control.controlRedraw' function to clear
--- the window with a background color, given by the four 'Prelude.Double' parameters for Red, Green,
--- Blue, and Alpha (in that order).
-cairoClearCanvas :: Double -> Double -> Double -> Double -> Cairo.Render ()
-cairoClearCanvas r g b a = do
-  logGUI <- mkLogger "cairoClearCanvas" True
-  liftIO $ logGUI $ unwords $ show <$> [r,g,b,a]
-  op <- Cairo.getOperator
-  Cairo.setOperator Cairo.OperatorSource
-  Cairo.setSourceRGBA r g b a
-  Cairo.paint
-  Cairo.setOperator op
-
--- | Use the Happlets-native color data type 'Happlets.Draw.Color.PackedRGBA32' to set the Cairo
--- "source" color in the Cairo context.
-cairoSetColorRGBA32 :: PackedRGBA32 -> Cairo.Render ()
-cairoSetColorRGBA32 = unpackRGBA32Color >>> \ (r,g,b,a) -> Cairo.setSourceRGBA r g b a
 
 -- | Convert a 'GtkCairoDiagram', which is a type of 'Diagrams.Core.Types.Diagram', and convert it
 -- to a Cairo 'Cairo.Render'-ing computation which can be used to set the 'controlView' of the

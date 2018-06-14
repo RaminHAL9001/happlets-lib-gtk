@@ -100,7 +100,7 @@ type Blue    = Double
 type Alpha   = Double
 
 circle :: V2 Double -> Radius -> Red -> Green -> Blue -> Alpha -> CairoRender ()
-circle (V2 x y) radius red green blue alpha = CairoRender $ do
+circle (V2 x y) radius red green blue alpha = cairoRender $ do
   op <- Cairo.getOperator
   Cairo.setOperator Cairo.OperatorSource
   Cairo.setSourceRGBA red green blue alpha
