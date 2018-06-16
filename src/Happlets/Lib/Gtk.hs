@@ -799,11 +799,29 @@ evalRedraw redraw = do
     Gtk.drawWindowInvalidateRegion (gtkDrawWindow livest) region True
     return a
 
+-- Draw directly to the window.
+evalDirectDraw :: (PixSize -> CairoRender a) -> GtkState a
+evalDirectDraw redraw = do
+  logGUI <- mkLogger "evalDirectDraw" True
+  env <- get
+  liftIO $ logWithMVar logGUI "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
+    (w, h) <- Gtk.drawableGetSize (gtkDrawWindow livest)
+    let size = V2 (sampCoord w) (sampCoord h)    
+    logGUI "Gtk.renderWithDrawable -- to theGtkDrawWindow"
+    a <- Gtk.renderWithDrawable (gtkDrawWindow livest) $ runCairoRender $ redraw size
+    region <- Gtk.regionRectangle $ Gtk.Rectangle 0 0 w h
+    logGUI "Gtk.drawWindowInvalidateRegion"
+    Gtk.drawWindowInvalidateRegion (gtkDrawWindow livest) region True
+    return a
+
 ----------------------------------------------------------------------------------------------------
 
 instance HappletWindow GtkWindow CairoRender where
   windowChangeHapplet = gtkSetHapplet
   onView = runGtkStateGUI . evalRedraw
+  drawToWindow = runGtkStateGUI . evalDirectDraw
+  refreshRegion = error "TODO: Happlets.Lib.Gtk Happlets.GUI.refreshRegion"
+  refreshWindow = error "TODO: Happlets.Lib.Gtk Happlets.GUI.refreshWindow"
 
 instance Happlet2DGraphics CairoRender where
   clearScreen = unpackRGBA32Color >>> \ (r,g,b,a) -> cairoRender $ cairoClearCanvas r g b a
