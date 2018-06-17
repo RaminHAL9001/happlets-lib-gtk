@@ -779,8 +779,8 @@ gtkSetHapplet newHapp init = do
     putGUIState $ st{ theGUIWindow = env  }
 
 -- Set which function redraws the window.
-evalRedraw :: (PixSize -> CairoRender a) -> GtkState a
-evalRedraw redraw = do
+evalCairoOnCanvas :: (PixSize -> CairoRender a) -> GtkState a
+evalCairoOnCanvas redraw = do
   logGUI <- mkLogger "evalRedraw" True
   env <- get
   liftIO $ logWithMVar logGUI "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
@@ -800,9 +800,9 @@ evalRedraw redraw = do
     return a
 
 -- Draw directly to the window.
-evalDirectDraw :: (PixSize -> CairoRender a) -> GtkState a
-evalDirectDraw redraw = do
-  logGUI <- mkLogger "evalDirectDraw" True
+evalCairoOnGtkDrawable :: (PixSize -> CairoRender a) -> GtkState a
+evalCairoOnGtkDrawable redraw = do
+  logGUI <- mkLogger "evalCairoOnGtkDrawable" True
   env <- get
   liftIO $ logWithMVar logGUI "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
     (w, h) <- Gtk.drawableGetSize (gtkDrawWindow livest)
@@ -818,10 +818,29 @@ evalDirectDraw redraw = do
 
 instance HappletWindow GtkWindow CairoRender where
   windowChangeHapplet = gtkSetHapplet
-  onView = runGtkStateGUI . evalRedraw
-  drawToWindow = runGtkStateGUI . evalDirectDraw
-  refreshRegion = error "TODO: Happlets.Lib.Gtk Happlets.GUI.refreshRegion"
-  refreshWindow = error "TODO: Happlets.Lib.Gtk Happlets.GUI.refreshWindow"
+  onCanvas            = runGtkStateGUI . evalCairoOnCanvas
+  onOSBuffer          = runGtkStateGUI . evalCairoOnGtkDrawable
+
+  refreshRegion rects = runGtkStateGUI $ do
+    logGUI <- mkLogger "refreshRegion" True
+    env <- get
+    liftIO $ logWithMVar logGUI "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
+      region <- Gtk.regionNew
+      forM_ (canonicalRect2D <$> rects) $ \ rect -> do
+        let p0 = rect ^. rect2DHead
+        let p1 = rect ^. rect2DTail
+        let (x, y) = (fromIntegral <$> p0) ^. pointXY
+        let (w, h) = (fromIntegral <$> (p1 - p0)) ^. pointXY
+        Gtk.regionUnionWithRect region $ Gtk.Rectangle x y w h
+      Gtk.drawWindowInvalidateRegion (gtkDrawWindow livest) region True
+
+  refreshWindow      = runGtkStateGUI $ do
+    logGUI <- mkLogger "refreshWindow" True
+    env <- get
+    liftIO $ logWithMVar logGUI "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
+      let win = gtkDrawWindow livest
+      (w, h) <- Gtk.drawableGetSize win
+      Gtk.drawWindowInvalidateRect win (Gtk.Rectangle 0 0 w h) True
 
 instance Happlet2DGraphics CairoRender where
   clearScreen = unpackRGBA32Color >>> \ (r,g,b,a) -> cairoRender $ cairoClearCanvas r g b a
@@ -829,7 +848,7 @@ instance Happlet2DGraphics CairoRender where
   drawPath a b c   = vectorMode >> cairoRender (cairoDrawPath a b c)
   drawRect a b c d = vectorMode >> cairoRender (cairoDrawRect a b c d)
   getPoint a       = cairoRender (cairoFlush >> cairoGetPoint a)
-  setPoint a@(Point2D (V2 (RealApprox x) (RealApprox y))) b =
+  setPoint a@(V2 (RealApprox x) (RealApprox y)) b =
     rasterMode x y >> cairoRender (cairoSetPoint a b)
 
 cairoArray :: (Int -> Int -> Cairo.SurfaceData Int Word32 -> IO a) -> Cairo.Render a

@@ -56,14 +56,14 @@ redGridDraw scale = fmap realToFrac >>> \ size@(V2 w h) ->
     let around top center =
           (takeWhile (>=  0) $ [1 ..] >>= \ i -> [center - scale * i :: RealApprox]) ++
           (takeWhile (< top) $ [0 ..] >>= \ i -> [center + scale * i :: RealApprox])
-    let mkLine v2 top i = Line2D (Point2D $ v2 i 0) (Point2D $ v2 i top)
+    let mkLine v2 top i = Line2D (v2 i 0) (v2 i top)
     clearScreen (black & alphaChannel .~ 0.9)
     forM_ (around w centerX) $ drawLine red 1.0 . mkLine V2 h
     forM_ (around h centerY) $ drawLine red 1.0 . mkLine (flip V2) w
 
 redGridGUI :: TestSuite -> PixSize -> GtkGUI RedGrid ()
 redGridGUI ctx _size = do
-  let draw = use redGridScale >>= onView . redGridDraw
+  let draw = use redGridScale >>= onCanvas . redGridDraw
   resizeEvents $ const draw
   mouseEvents MouseButton $ \ (Mouse _ down _ button _) -> when down $ case button of
     RightClick -> switchToPulseCircle ctx
@@ -129,7 +129,7 @@ pulseCircleGUI ctx initSize@(V2 (SampCoord w) (SampCoord h)) = do
       old <- get
       pulseCirclePosition .= (realToFrac <$> newXY)
       new <- get
-      onView $ drawDot False old new
+      onCanvas $ drawDot False old new
 
   -- On resize, simply redraw the window without modifying the model. We don't need to use the new
   -- size information for the window.
@@ -141,17 +141,17 @@ pulseCircleGUI ctx initSize@(V2 (SampCoord w) (SampCoord h)) = do
     pulseCirclePosition   .= V2 (f x newW oldW) (f y newH oldH)
     pulseCircleWindowSize .= newSize
     new <- get
-    onView $ drawDot True old new
+    onCanvas $ drawDot True old new
 
   -- Install an animator thread which makes the radius of the circle as a function of time.
   stepFrameEvents $ \ t -> do
     old <- get
     pulseCircleRadius .= 20 * sin (2*pi * realToFrac t) + 40
     new <- get
-    onView $ drawDot False old new
+    onCanvas $ drawDot False old new
 
   -- Clear the window. If you don't do this, the behavior of what the initial window will look
   -- like is not defined in the Happlets protocol. It could be a default solid color, or it could
   -- be random garbage.
   model <- get
-  onView $ drawDot True model model
+  onCanvas $ drawDot True model model
