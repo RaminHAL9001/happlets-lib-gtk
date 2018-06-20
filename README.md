@@ -37,17 +37,6 @@ https://hackage.haskell.org/package/happlets
 
 ## Known Bugs
 
-The implementation for the 'windowChangeHapplet' function in the
-'Happlets.GUI.HappletWindow' type class is known to result in the window
-freezing.
-
-The 'setPoint' and 'getPoint' functions in the
-'Happlets.Draw.Happlet2DGraphics' type class are 'undefined' and will
-throw a runtime exception in the GUI event handler thread if
-evaluated. Every event handled triggers code execution in it's own
-light-weight thread, so this will not crash the whole program, only that
-one thread.
-
 The 'Happlets.GUI.CanBufferImages' type class has not been tested at
 all, and in fact I am evaluating the possibility of rewriting the
 implementation to make use of Cairo "Surfaces" rather than Gtk+
