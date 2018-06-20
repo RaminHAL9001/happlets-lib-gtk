@@ -2,8 +2,6 @@ module Happlets.Lib.Gtk.TestSuite where
 
 import           Happlets.Lib.Gtk
 
-import           Control.Arrow
-
 import           Linear.V2
 
 import qualified Graphics.Rendering.Cairo as Cairo
@@ -32,7 +30,7 @@ main = happlet gtkHapplet $ do
     , thePulseCircleWindowSize = V2 640 480
     }
 
-  redgrid     <- newHapplet (RedGrid 64.0)
+  redgrid     <- newHapplet (RedGrid 64.0 Nothing)
 
   let testSuite = TestSuite
         { switchToPulseCircle = windowChangeHapplet pulsecircle $ pulseCircleGUI testSuite
@@ -43,14 +41,22 @@ main = happlet gtkHapplet $ do
 
 ----------------------------------------------------------------------------------------------------
 
-newtype RedGrid = RedGrid { theRedGridScale :: RealApprox }
+data RedGrid
+  = RedGrid
+    { theRedGridScale :: RealApprox
+    , theLastMouse    :: Maybe PixCoord
+    }
   deriving (Eq, Ord, Show, Read)
+
+lastMouse :: Lens' RedGrid (Maybe PixCoord)
+lastMouse = lens theLastMouse $ \ a b -> a{ theLastMouse = b }
 
 redGridScale :: Lens' RedGrid RealApprox
 redGridScale = lens theRedGridScale $ \ a b -> a{ theRedGridScale = b }
 
 redGridDraw :: RealApprox -> PixSize -> CairoRender ()
-redGridDraw scale = fmap realToFrac >>> \ size@(V2 w h) ->
+redGridDraw scale winsize = do
+  let size@(V2 w h) = realToFrac <$> winsize
   if scale <= 1 then clearScreen red else do
     let (V2 centerX centerY) = (/ 2.0) <$> size
     let around top center =
@@ -63,15 +69,27 @@ redGridDraw scale = fmap realToFrac >>> \ size@(V2 w h) ->
 
 redGridGUI :: TestSuite -> PixSize -> GtkGUI RedGrid ()
 redGridGUI ctx _size = do
-  let draw = use redGridScale >>= onCanvas . redGridDraw
-  resizeEvents $ const draw
-  mouseEvents MouseButton $ \ (Mouse _ down _ button _) -> when down $ case button of
-    RightClick -> switchToPulseCircle ctx
-    _          -> do
-      scale <- use redGridScale
-      redGridScale .= if scale <= 4.0 then 64.0 else scale / 2.0
-      draw
-  draw
+  let draw size = use redGridScale >>= onCanvas . flip redGridDraw size
+  resizeEvents draw
+  mouseEvents MouseAll $ \ (Mouse _ down _ button pt1@(V2 x y)) -> do
+    when down $ case button of
+      RightClick -> switchToPulseCircle ctx
+      LeftClick  -> do
+        scale <- use redGridScale
+        redGridScale .= if scale <= 4.0 then 64.0 else scale / 2.0
+        getWindowSize >>= draw
+      _          -> return ()
+    use lastMouse >>= \ case
+      Nothing       -> return ()
+      Just (V2 x y) -> refreshRegion
+        [ rect2D & rect2DHead .~ V2 (x - 22) (y - 22) & rect2DTail .~ V2 (x + 22) (y + 22) ]
+    lastMouse .= Just pt1
+    onOSBuffer $ cairoRender $ do
+      Cairo.setLineWidth (3.0)
+      Cairo.arc (realToFrac x) (realToFrac y) (20.0) (0.0) (2*pi)
+      cairoSetColorRGBA32 green
+      Cairo.stroke
+  getWindowSize >>= draw
 
 ----------------------------------------------------------------------------------------------------
 
@@ -117,10 +135,10 @@ pulseCircleGUI ctx initSize@(V2 (SampCoord w) (SampCoord h)) = do
   -- Declare a function for drawing the model:
   let drawDot clear
         (PulseCircle{thePulseCircleRadius=oldR,thePulseCirclePosition=oldXY})
-        (PulseCircle{thePulseCircleRadius=newR,thePulseCirclePosition=newXY}) = \ _size -> do
-            when clear $ clearScreen (black & alphaChannel .~ 0.9)
-            circle oldXY (max oldR newR + 1.0) 0.0  0.0  0.0  0.9
-            circle newXY           newR        0.0  0.0  1.0  1.0
+        (PulseCircle{thePulseCircleRadius=newR,thePulseCirclePosition=newXY}) = do
+          when clear $ clearScreen (black & alphaChannel .~ 0.9)
+          circle oldXY (max oldR newR + 1.0) 0.0  0.0  0.0  0.9
+          circle newXY           newR        0.0  0.0  1.0  1.0
 
   -- Install the mouse event handling function.
   mouseEvents MouseDrag $ \ (Mouse _ down _ button newXY) -> when down $ case button of
