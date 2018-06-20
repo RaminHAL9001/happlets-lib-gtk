@@ -5,7 +5,7 @@
 -- 'newGtkWindow' to create a new window, and any of the "Happlet.World" functinos to manipulate the
 -- windows. This module re-exports the "Happlets" module so it is not necessary to import both.
 module Happlets.Lib.Gtk
-  ( gtkHapplet, gtkAnimationFrameRate, GtkGUI, GtkRedraw,
+  ( gtkHapplet, gtkAnimationFrameRate, GtkGUI,
     GtkWindow, gtkLaunchEventLoop,
     GtkImage,
     -- * Cairo Wrapper Functions
@@ -779,20 +779,18 @@ gtkSetHapplet newHapp init = do
     putGUIState $ st{ theGUIWindow = env  }
 
 -- Set which function redraws the window.
-evalCairoOnCanvas :: (PixSize -> CairoRender a) -> GtkState a
+evalCairoOnCanvas :: CairoRender a -> GtkState a
 evalCairoOnCanvas redraw = do
-  logGUI <- mkLogger "evalRedraw" True
+  logGUI <- mkLogger "evalCairoOnCanvas" True
   env <- get
   liftIO $ logWithMVar logGUI "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
-    -- Obtain the size from the draw window, but will not draw to the draw window.
     (w, h) <- Gtk.drawableGetSize (gtkDrawWindow livest)
-    let size = V2 (sampCoord w) (sampCoord h)
 #if USE_CAIRO_SURFACE_BUFFER
     logGUI $ "Cairo.renderWith"
-    a <- Cairo.renderWith (theCairoSurface livest) $ runCairoRender $ redraw size
+    a <- Cairo.renderWith (theCairoSurface livest) $ runCairoRender redraw
 #else
     logGUI "Gtk.renderWithDrawable -- to theGtkPixmap"
-    a <- Gtk.renderWithDrawable (theGtkPixmap livest) $ runCairoRender $ redraw size
+    a <- Gtk.renderWithDrawable (theGtkPixmap livest) $ runCairoRender redraw
 #endif
     region <- Gtk.regionRectangle $ Gtk.Rectangle 0 0 w h
     logGUI "Gtk.drawWindowInvalidateRegion"
@@ -800,23 +798,25 @@ evalCairoOnCanvas redraw = do
     return a
 
 -- Draw directly to the window.
-evalCairoOnGtkDrawable :: (PixSize -> CairoRender a) -> GtkState a
+evalCairoOnGtkDrawable :: CairoRender a -> GtkState a
 evalCairoOnGtkDrawable redraw = do
   logGUI <- mkLogger "evalCairoOnGtkDrawable" True
   env <- get
   liftIO $ logWithMVar logGUI "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
-    (w, h) <- Gtk.drawableGetSize (gtkDrawWindow livest)
-    let size = V2 (sampCoord w) (sampCoord h)    
     logGUI "Gtk.renderWithDrawable -- to theGtkDrawWindow"
-    a <- Gtk.renderWithDrawable (gtkDrawWindow livest) $ runCairoRender $ redraw size
-    region <- Gtk.regionRectangle $ Gtk.Rectangle 0 0 w h
-    logGUI "Gtk.drawWindowInvalidateRegion"
-    Gtk.drawWindowInvalidateRegion (gtkDrawWindow livest) region True
-    return a
+    Gtk.renderWithDrawable (gtkDrawWindow livest) $ runCairoRender redraw
 
 ----------------------------------------------------------------------------------------------------
 
 instance HappletWindow GtkWindow CairoRender where
+  getWindowSize       = runGtkStateGUI $ do
+    logGUI <- mkLogger "getWindowSize" True
+    env <- get
+    liftIO $ logWithMVar logGUI "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
+      -- Obtain the size from the draw window, but will not draw to the draw window.
+      (w, h) <- Gtk.drawableGetSize (gtkDrawWindow livest)
+      return $ V2 (sampCoord w) (sampCoord h)
+
   windowChangeHapplet = gtkSetHapplet
   onCanvas            = runGtkStateGUI . evalCairoOnCanvas
   onOSBuffer          = runGtkStateGUI . evalCairoOnGtkDrawable
@@ -824,23 +824,24 @@ instance HappletWindow GtkWindow CairoRender where
   refreshRegion rects = runGtkStateGUI $ do
     logGUI <- mkLogger "refreshRegion" True
     env <- get
-    liftIO $ logWithMVar logGUI "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
-      region <- Gtk.regionNew
-      forM_ (canonicalRect2D <$> rects) $ \ rect -> do
-        let p0 = rect ^. rect2DHead
-        let p1 = rect ^. rect2DTail
-        let (x, y) = (fromIntegral <$> p0) ^. pointXY
-        let (w, h) = (fromIntegral <$> (p1 - p0)) ^. pointXY
-        Gtk.regionUnionWithRect region $ Gtk.Rectangle x y w h
-      Gtk.drawWindowInvalidateRegion (gtkDrawWindow livest) region True
+    liftIO $ logWithMVar logGUI "gtkWindowLive" (gtkWindowLive env) $ \ livest ->
+      Gtk.renderWithDrawable (gtkDrawWindow livest) $
+        forM_ (fmap realToFrac . canonicalRect2D <$> rects) $ \ rect -> do
+          Cairo.setOperator Cairo.OperatorSource
+          Cairo.setSourceSurface (theCairoSurface livest) (0.0) (0.0)
+          let (x, y) = (rect) ^. rect2DHead . pointXY
+          let (w, h) = ((rect ^. rect2DTail) - (rect ^. rect2DHead)) ^. pointXY
+          Cairo.rectangle x y w h
+          Cairo.fill
 
   refreshWindow      = runGtkStateGUI $ do
     logGUI <- mkLogger "refreshWindow" True
     env <- get
     liftIO $ logWithMVar logGUI "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
-      let win = gtkDrawWindow livest
-      (w, h) <- Gtk.drawableGetSize win
-      Gtk.drawWindowInvalidateRect win (Gtk.Rectangle 0 0 w h) True
+      Gtk.renderWithDrawable (gtkDrawWindow livest) $ do
+        Cairo.setOperator Cairo.OperatorSource
+        Cairo.setSourceSurface (theCairoSurface livest) (0.0) (0.0)
+        Cairo.paint
 
 instance Happlet2DGraphics CairoRender where
   clearScreen = unpackRGBA32Color >>> \ (r,g,b,a) -> cairoRender $ cairoClearCanvas r g b a
@@ -1293,9 +1294,6 @@ gdkBlit canvas pixmap (V2 dx dy)  = do
 -- 'Diagrams.BoundingBox.BoundingBox'. Use the 'Diagrams.BoundingBox.BoundingBox' information to
 -- inform the placement and scale of your diagram.
 type GtkCairoDiagram = BoundingBox V2 Double -> Diagram Cairo
-
--- | This is a 'Happlets.View.Redraw' type function specific to this Gtk+ back-end provider.
-type GtkRedraw a = CairoRender a
 
 -- | This data type contains a pointer to an image buffer in memory, and also a function used to
 -- perform some drawing to the pixel values.
