@@ -87,7 +87,7 @@ redGridGUI ctx _size = do
     onOSBuffer $ cairoRender $ do
       Cairo.setLineWidth (3.0)
       Cairo.arc (realToFrac x) (realToFrac y) (20.0) (0.0) (2*pi)
-      cairoSetColorRGBA32 green
+      cairoSetColorRGBA32 lime
       Cairo.stroke
   getWindowSize >>= draw
 

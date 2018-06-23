@@ -44,7 +44,6 @@ import           Control.Arrow
 import           Control.Concurrent
 
 import           Data.Array.MArray
-import           Data.Bits (rotate)
 import           Data.IORef
 import           Data.Maybe
 import           Data.Semigroup
@@ -104,7 +103,7 @@ mkLogger func enable = return $ if not (debugThisModule && enable)
   then const $ return ()
   else \ msg -> do
     tid <- myThreadId
-    traceIO $ '[' : show tid ++ "][Happlets.Lib.Gtk." ++ func ++ "] " ++ msg
+    traceM $ '[' : show tid ++ "][Happlets.Lib.Gtk." ++ func ++ "] " ++ msg
 
 logModMVar :: LogGUI -> String -> MVar a -> (a -> IO (a, b)) -> IO b
 logModMVar logGUI label mvar f = do
@@ -864,7 +863,7 @@ pointToInt w _h pt = let (x, y) = (round <$> pt) ^. pointXY in y*w + x
 -- | The implementation of 'Happlets.Draw.getPoint' for the 'Cairo.Render' function type.
 cairoGetPoint :: Point2D RealApprox -> Cairo.Render PackedRGBA32
 cairoGetPoint pt = cairoArray $ \ w h surfaceData ->
-  liftIO $ PackedRGBA32 . (`rotate` 8) <$> readArray surfaceData (pointToInt w h pt)
+  liftIO $ set32BitsARGB <$> readArray surfaceData (pointToInt w h pt)
 
 -- | Call this function at least once before calling 'cairoSetPoint'. Note that if you use a
 -- 'CairoRender' function type and the ordinary 'Happlets.Draw.setPoint' function in the
@@ -875,8 +874,8 @@ cairoFlush = Cairo.withTargetSurface Cairo.surfaceFlush
 
 -- | Force a single pixel at a given location to change to the given color.
 cairoSetPoint :: Point2D RealApprox -> PackedRGBA32 -> Cairo.Render ()
-cairoSetPoint pt (PackedRGBA32 w32) = cairoArray $ \ w h surfaceData ->
-  liftIO $ writeArray surfaceData (pointToInt w h pt) $ rotate w32 (-8)
+cairoSetPoint pt = get32BitsARGB >>> \ w32 -> cairoArray $ \ w h surfaceData ->
+  liftIO $ writeArray surfaceData (pointToInt w h pt) w32
 
 -- | Call this function at least once after you have finished a series of calls to 'cairoSetPoint'
 -- but before any calls to any other cairo functions. Note that if you use a 'CairoRender' function
