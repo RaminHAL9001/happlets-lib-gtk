@@ -68,7 +68,7 @@ redGridDraw scale winsize = do
     forM_ (around h centerY) $ drawLine red 1.0 . mkLine (flip V2) w
     screenPrinter $ do
       textCursor %= (gridRow .~ 1) . (gridColumn .~ 1)
-      displayString $ show scale
+      displayString $ "Grid square size = " ++ show scale
 
 redGridGUI :: TestSuite -> PixSize -> GtkGUI RedGrid ()
 redGridGUI ctx _size = do

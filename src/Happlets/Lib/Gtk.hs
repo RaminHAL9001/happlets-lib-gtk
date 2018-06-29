@@ -74,7 +74,7 @@ import qualified Graphics.UI.Gtk.Misc.EventBox      as Gtk
 import           Diagrams.Backend.Cairo.Internal
 import           Diagrams.BoundingBox
 import           Diagrams.Core.Compile
-import           Diagrams.Core.Types
+import           Diagrams.Core.Types              (Diagram)
 import           Diagrams.Size                    (dims)
 
 import           Linear.Affine
@@ -168,13 +168,13 @@ data CairoRenderMode
 data CairoRenderState
   = CairoRenderState
     { cairoKeepWinSize           :: !PixSize
-    , theMinFontExtents          :: !(Maybe Cairo.FontExtents)
+    --  , theMinFontExtents          :: !(Maybe Cairo.FontExtents)
     , theCairoRenderMode         :: !CairoRenderMode
     , theCairoScreenPrinterState :: !ScreenPrinterState
     }
 
-minFontExtents :: Lens' CairoRenderState (Maybe Cairo.FontExtents)
-minFontExtents = lens theMinFontExtents $ \ a b -> a{ theMinFontExtents = b }
+--minFontExtents :: Lens' CairoRenderState (Maybe Cairo.FontExtents)
+--minFontExtents = lens theMinFontExtents $ \ a b -> a{ theMinFontExtents = b }
 
 cairoRenderMode :: Lens' CairoRenderState CairoRenderMode
 cairoRenderMode = lens theCairoRenderMode $ \ a b -> a{ theCairoRenderMode = b }
@@ -265,21 +265,21 @@ data GtkWindowLive
 
 data GtkWindowState
   = GtkWindowState
-    { currentConfig            :: !Config
-    , thisWindow               :: !(MVar GtkWindowState)
-    , gtkWindowLive            :: !(MVar GtkWindowLive)
-    , gtkWindow                :: !Gtk.Window
-    , theCairoRenderState :: !CairoRenderState
-    , theInitReaction          :: !(ConnectReact PixSize)
-    , theResizeReaction        :: !(ConnectReact PixCoord)
-    , theVisibilityReaction    :: !(ConnectReact Bool)
-    , theFocusReaction         :: !(ConnectReact Bool)
-    , theMouseHandler          :: !(ConnectReact Mouse)
-    , theCursorHandler         :: !(ConnectReact Mouse)
-    , theKeyHandler            :: !(ConnectReact Keyboard)
-    , theAnimatorThread        :: !(ConnectReact AnimationMoment)
+    { currentConfig          :: !Config
+    , thisWindow             :: !(MVar GtkWindowState)
+    , gtkWindowLive          :: !(MVar GtkWindowLive)
+    , gtkWindow              :: !Gtk.Window
+    , theCairoRenderState    :: !CairoRenderState
+    , theInitReaction        :: !(ConnectReact PixSize)
+    , theResizeReaction      :: !(ConnectReact PixCoord)
+    , theVisibilityReaction  :: !(ConnectReact Bool)
+    , theFocusReaction       :: !(ConnectReact Bool)
+    , theMouseHandler        :: !(ConnectReact Mouse)
+    , theCursorHandler       :: !(ConnectReact Mouse)
+    , theKeyHandler          :: !(ConnectReact Keyboard)
+    , theAnimatorThread      :: !(ConnectReact AnimationMoment)
 #if USE_EVENT_BOX
-    , gtkEventBox              :: !Gtk.EventBox
+    , gtkEventBox            :: !Gtk.EventBox
 #endif
     }
 
@@ -464,7 +464,7 @@ createWin cfg = do
         , gtkWindow                = window
         , theCairoRenderState      = CairoRenderState
             { cairoKeepWinSize           = V2 0 0
-            , theMinFontExtents          = Nothing
+            --  , theMinFontExtents          = Nothing
             , theCairoRenderMode         = VectorMode
             , theCairoScreenPrinterState = screenPrinterState
             }
@@ -891,12 +891,13 @@ instance Happlet2DGraphics CairoRender where
     rasterMode x y >> cairoRender (cairoSetPoint a b)
 
 instance RenderText CairoRender where
-  getGridCellSize = CairoRender $ use minFontExtents >>= \ case
-    Just ext -> return $ Cairo.fontExtentsMaxXadvance ext
-    Nothing  -> do
-      ext <- lift cairoGetMinFontExtents
-      minFontExtents .= Just ext
-      return $ Cairo.fontExtentsMaxXadvance ext
+  getGridCellSize = cairoRender $ (/ 24.0) <$> cairoGetDPI
+--    CairoRender $ use minFontExtents >>= \ case
+--      Just ext -> return $ Cairo.fontExtentsMaxXadvance ext
+--      Nothing  -> do
+--        ext <- lift cairoGetMinFontExtents
+--        minFontExtents .= Just ext
+--        return $ (\x -> trace ("SET GRID SIZE = "++show x) x) $ Cairo.fontExtentsHeight ext / 2
     
   getWindowGridCellSize = do
     size <- getGridCellSize
@@ -906,30 +907,33 @@ instance RenderText CairoRender where
   screenPrintCharNoAdvance st c = do
     let fs = st ^. printerFontStyle
     let bgcolor = fs ^. fontBackColor
-    let loc = st ^. textCursor
-    (loc0, loc1) <- (,) <$>
-      (fmap realToFrac <$> gridTextLocationToPoint  loc) <*>
-      ( fmap realToFrac <$>
-          gridTextLocationToPoint (loc &~ do{ gridRow += 1; gridColumn += 1; })
-      )
+    let off@(V2 offX offY) = st ^. renderOffset
+    let loc@(TextGridLocation (TextGridRow dbgRow) (TextGridColumn dbgCol)) = st ^. textCursor
+    traceM $ "\nprinch "++show c++" @"++show dbgRow++","++show dbgCol
+    loc0@(V2 x0 _y0) <- (+ (off - V2 (2.0) (3.0))) <$> gridTextLocationToPoint loc
+    dLoc <- fmap realToFrac <$> getPixSizeOfChar (fs ^. fontSize) c
+    traceM $ "startPoint="++show loc0++" rectSize="++show dLoc
     rendst <- CairoRender get
-    rendst <- case rendst ^. minFontExtents of
-      Just{}  -> return rendst
-      Nothing -> do
-        extns <- cairoRender $ cairoGetMinFontExtents <* cairoSetFontStyle fs
-        CairoRender $ do
-          minFontExtents .= Just extns
-          cairoScreenPrinterState . printerFontStyle .= fs
-          get
+    --rendst <- case rendst ^. minFontExtents of
+    --  Just{}  -> return rendst
+    --  Nothing -> do
+    --    extns <- cairoRender $ cairoGetMinFontExtents <* cairoSetFontStyle fs
+    --    CairoRender $ do
+    --      traceM $ "init minFontDesc "++show (Cairo.fontExtentsDescent extns)
+    --      minFontExtents .= Just extns
+    --      cairoScreenPrinterState . printerFontStyle .= fs
+    --      get
+    let loc1@(V2 _x1 y1) = loc0 + dLoc
     extns  <- cairoRender $ do
       Cairo.setOperator Cairo.OperatorSource
-      cairoDrawRect bgcolor (0.0) bgcolor (rect2D &~ do{ rect2DHead .= loc0; rect2DTail .= loc1; })
+      traceM $ "bgRect "++show loc0++"+"++show dLoc
+      cairoDrawRect bgcolor (0.0) bgcolor
+        (rect2D & rect2DHead .~ (realToFrac <$> loc0) & rect2DTail .~ (realToFrac <$> loc1))
       cairoSetColorRGBA32 $ fs ^. fontForeColor
       when (rendst ^. cairoScreenPrinterState . printerFontStyle /= fs) (cairoSetFontStyle fs)
       Cairo.fontExtents
-    (V2 x y) <- gridTextLocationToPoint (loc &~ gridRow += 1)
     cairoRender $ do
-      Cairo.moveTo (x + 0.5) (y + 0.5 - Cairo.fontExtentsDescent extns)
+      Cairo.moveTo (x0 + 0.5 + offX) (y1 - 0.5 + offY - Cairo.fontExtentsDescent extns)
       Cairo.showText (c:"")
       Cairo.fill
 
@@ -940,14 +944,14 @@ instance RenderText CairoRender where
 cairoGetDPI :: Cairo.Render Double
 cairoGetDPI = return 96.0
 
-cairoGetMinFontExtents :: Cairo.Render Cairo.FontExtents
-cairoGetMinFontExtents = do
-  Cairo.save
-  Cairo.selectFontFace ("monospace" :: Strict.Text) Cairo.FontSlantNormal Cairo.FontWeightNormal
-  dpi <- cairoGetDPI
-  Cairo.setFontSize (dpi / 12.0)
-  Cairo.fontExtents
-    <* Cairo.restore
+--cairoGetMinFontExtents :: Cairo.Render Cairo.FontExtents
+--cairoGetMinFontExtents = do
+--  Cairo.save
+--  Cairo.selectFontFace ("monospace" :: Strict.Text) Cairo.FontSlantNormal Cairo.FontWeightNormal
+--  dpi <- cairoGetDPI
+--  Cairo.setFontSize (dpi / 12.0)
+--  Cairo.fontExtents
+--    <* Cairo.restore
 
 cairoSetFontStyle :: FontStyle -> Cairo.Render ()
 cairoSetFontStyle fs = do
@@ -1041,15 +1045,16 @@ cairoDrawRect :: LineColor -> LineWidth -> FillColor -> Rect2D RealApprox -> Cai
 cairoDrawRect lineColor width fillColor rect = do
   cairoSetColorRGBA32 fillColor
   cairoMoveTo $ rect ^. rect2DHead
-  let ((x0,y0),(x1,y1)) = view pointXY *** view pointXY $
-        (unwrapRealApprox <$> rect) ^. rect2DPoints
-  Cairo.rectangle x0 y0 x1 y1
+  let (head, tail) = (unwrapRealApprox <$> canonicalRect2D rect) ^. rect2DPoints
+  let (x, y) = head ^. pointXY
+  let (w, h) = (tail - head) ^. pointXY
+  Cairo.rectangle x y w h
   Cairo.fill
   when (width > 0.0) $ do
     cairoSetColorRGBA32 lineColor
     Cairo.setLineWidth $ unwrapRealApprox width
     Cairo.setLineJoin Cairo.LineJoinMiter
-    Cairo.rectangle x0 y0 x1 y1
+    Cairo.rectangle x y w h
     Cairo.stroke
 
 -- | This is a helpful function you can use for your 'Happlet.Control.controlRedraw' function to clear
