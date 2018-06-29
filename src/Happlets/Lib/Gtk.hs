@@ -972,7 +972,7 @@ pointToInt :: Int -> Int -> Point2D RealApprox -> Int
 pointToInt w _h pt = let (x, y) = (round <$> pt) ^. pointXY in y*w + x
 
 -- | The implementation of 'Happlets.Draw.getPoint' for the 'Cairo.Render' function type.
-cairoGetPoint :: Point2D RealApprox -> Cairo.Render PackedRGBA32
+cairoGetPoint :: Point2D RealApprox -> Cairo.Render Color
 cairoGetPoint pt = cairoArray $ \ w h surfaceData ->
   liftIO $ set32BitsARGB <$> readArray surfaceData (pointToInt w h pt)
 
@@ -984,7 +984,7 @@ cairoFlush :: Cairo.Render ()
 cairoFlush = Cairo.withTargetSurface Cairo.surfaceFlush
 
 -- | Force a single pixel at a given location to change to the given color.
-cairoSetPoint :: Point2D RealApprox -> PackedRGBA32 -> Cairo.Render ()
+cairoSetPoint :: Point2D RealApprox -> Color -> Cairo.Render ()
 cairoSetPoint pt = get32BitsARGB >>> \ w32 -> cairoArray $ \ w h surfaceData ->
   liftIO $ writeArray surfaceData (pointToInt w h pt) w32
 
@@ -996,9 +996,9 @@ cairoSetPoint pt = get32BitsARGB >>> \ w32 -> cairoArray $ \ w h surfaceData ->
 cairoInvalidate :: Cairo.Render ()
 cairoInvalidate = Cairo.withTargetSurface Cairo.surfaceMarkDirty
 
--- | Use the Happlets-native color data type 'Happlets.Draw.Color.PackedRGBA32' to set the Cairo
+-- | Use the Happlets-native color data type 'Happlets.Draw.Color.Color' to set the Cairo
 -- "source" color in the Cairo context.
-cairoSetColorRGBA32 :: PackedRGBA32 -> Cairo.Render ()
+cairoSetColorRGBA32 :: Color -> Cairo.Render ()
 cairoSetColorRGBA32 = unpackRGBA32Color >>> \ (r,g,b,a) -> Cairo.setSourceRGBA r g b a
 
 -- | Push the graphics context by calling 'Cairo.save' before evaluating a given 'Cario.Render'
