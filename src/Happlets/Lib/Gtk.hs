@@ -904,7 +904,7 @@ instance RenderText CairoRender where
     (V2 w h) <- CairoRender $ gets cairoKeepWinSize
     return $ V2 (realToFrac w / size) (realToFrac h / size)
     
-  screenPrintCharNoAdvance st c = do
+  screenPrintCharNoAdvance st c = unless (not (isPrint c) || wcwidth c <= 0) $ do
     let fs = st ^. printerFontStyle
     let bgcolor = fs ^. fontBackColor
     let off@(V2 offX offY) = st ^. renderOffset
