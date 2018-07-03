@@ -26,8 +26,9 @@ main = happlet gtkHapplet $ do
   win         <- newWindow
   pulsecircle <- newHapplet PulseCircle
     { thePulseCircleRadius     = 20
-    , thePulseCirclePosition   = V2   0   0
-    , thePulseCircleWindowSize = V2 640 480
+    , thePulseCirclePosition   = V2 (-1) (-1)
+    , thePulseCircleWindowSize = V2  640  480
+    , thePulseCircleColor      = blue
     }
 
   redgrid     <- newHapplet (RedGrid 64.0 Nothing)
@@ -90,7 +91,7 @@ redGridGUI ctx _size = do
     onOSBuffer $ cairoRender $ do
       Cairo.setLineWidth (3.0)
       Cairo.arc (realToFrac x) (realToFrac y) (20.0) (0.0) (2*pi)
-      cairoSetColorRGBA32 lime
+      cairoSetColor lime
       Cairo.stroke
   getWindowSize >>= draw
 
@@ -100,9 +101,10 @@ data PulseCircle
   = PulseCircle
     { thePulseCircleRadius     :: !Double
     , thePulseCirclePosition   :: !(V2 Double)
+    , thePulseCircleColor      :: !Color
     , thePulseCircleWindowSize :: !PixSize
     }
-  deriving (Eq, Ord, Show, Read)
+  deriving (Eq, Show, Read)
 
 pulseCircleRadius :: Lens' PulseCircle Double
 pulseCircleRadius = lens thePulseCircleRadius $ \ a b -> a{ thePulseCircleRadius = b }
@@ -110,21 +112,19 @@ pulseCircleRadius = lens thePulseCircleRadius $ \ a b -> a{ thePulseCircleRadius
 pulseCirclePosition :: Lens' PulseCircle (V2 Double)
 pulseCirclePosition = lens thePulseCirclePosition $ \ a b -> a{ thePulseCirclePosition = b }
 
+pulseCircleColor :: Lens' PulseCircle Color
+pulseCircleColor = lens thePulseCircleColor $ \ a b -> a{ thePulseCircleColor = b }
+
 pulseCircleWindowSize :: Lens' PulseCircle PixSize
 pulseCircleWindowSize = lens thePulseCircleWindowSize $ \ a b -> a{ thePulseCircleWindowSize = b }
 
 type Radius  = Double
 type PenSize = Double
-type Red     = Double
-type Green   = Double
-type Blue    = Double
-type Alpha   = Double
 
-circle :: V2 Double -> Radius -> Red -> Green -> Blue -> Alpha -> CairoRender ()
-circle (V2 x y) radius red green blue alpha = cairoRender $ do
-  op <- Cairo.getOperator
-  Cairo.setOperator Cairo.OperatorSource
-  Cairo.setSourceRGBA red green blue alpha
+circle :: V2 Double -> Radius -> Color -> CairoRender ()
+circle (V2 x y) radius color = cairoRender $ do
+  op <- Cairo.getOperator <* Cairo.setOperator Cairo.OperatorSource
+  cairoSetColor color
   Cairo.arc (x + 0.5) (y + 0.5) radius 0.0 (2.0 * pi)
   Cairo.fill
   Cairo.setOperator op
@@ -132,16 +132,35 @@ circle (V2 x y) radius red green blue alpha = cairoRender $ do
 pulseCircleGUI :: TestSuite -> PixSize -> GtkGUI PulseCircle ()
 pulseCircleGUI ctx initSize@(V2 (SampCoord w) (SampCoord h)) = do
   -- Initialize the model such that the circle is placed in the middle of the window.
-  pulseCirclePosition .= V2 (realToFrac w / 2) (realToFrac h / 2)
+  pulseCirclePosition %= \ old@(V2 oldW oldH) ->
+    if oldW < 0 || oldH < 0 then V2 (realToFrac w / 2) (realToFrac h / 2) else old
   pulseCircleWindowSize .= initSize
 
   -- Declare a function for drawing the model:
   let drawDot clear
         (PulseCircle{thePulseCircleRadius=oldR,thePulseCirclePosition=oldXY})
-        (PulseCircle{thePulseCircleRadius=newR,thePulseCirclePosition=newXY}) = do
-          when clear $ clearScreen (black & alphaChannel .~ 0.9)
-          circle oldXY (max oldR newR + 1.0) 0.0  0.0  0.0  0.9
-          circle newXY           newR        0.0  0.0  1.0  1.0
+        (PulseCircle
+         {thePulseCircleRadius=newR
+         ,thePulseCirclePosition=newXY
+         ,thePulseCircleColor=color
+         }) = do
+            let bg = black & alphaChannel .~ 0.9
+            when clear $ clearScreen bg
+            circle oldXY (max oldR newR + 1.0) bg
+            circle newXY           newR        color
+
+  keyboardEvents $ \ case
+    (Keyboard True (ModifierBits 0) (CharKey ' ')) -> do
+      pulseCircleColor %= \ case
+        c | c == blue    -> red
+        c | c == red     -> lime
+        c | c == lime    -> yellow
+        c | c == yellow  -> cyan
+        c | c == cyan    -> green
+        c | c == green   -> magenta
+        c | c == magenta -> white
+        _                -> blue
+    _ -> return ()
 
   -- Install the mouse event handling function.
   mouseEvents MouseDrag $ \ (Mouse _ down _ button newXY) -> when down $ case button of

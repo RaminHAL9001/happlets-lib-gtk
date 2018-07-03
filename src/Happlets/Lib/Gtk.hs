@@ -13,7 +13,7 @@ module Happlets.Lib.Gtk
     -- function, but using point, line, and color values specified in the "Happlets.Draw"
     -- sub-modules.
     CairoRender, cairoRender, GtkCairoDiagram, gtkCairoDiagram,
-    cairoClearCanvas, cairoSetColorRGBA32,
+    cairoClearCanvas, cairoSetColor,
     cairoDrawPath, cairoMoveTo, cairoLineTo, cairoDrawLine,
     cairoDrawRect, cairoPreserve,
     cairoFlush, cairoSetPoint, cairoGetPoint, cairoInvalidate,
@@ -45,6 +45,7 @@ import           Control.Concurrent
 
 import           Data.Array.MArray
 import           Data.IORef
+import qualified Data.Map          as Map
 import           Data.Maybe
 import           Data.Semigroup
 import qualified Data.Text         as Strict
@@ -53,22 +54,27 @@ import           Data.Word
 
 import qualified Graphics.Rendering.Cairo           as Cairo
 
+import qualified Graphics.UI.Gtk.Abstract.Container as Gtk
 import qualified Graphics.UI.Gtk.Abstract.Widget    as Gtk
 import qualified Graphics.UI.Gtk.Cairo              as Gtk
 import qualified Graphics.UI.Gtk.Gdk.Drawable       as Gtk
 import qualified Graphics.UI.Gtk.Gdk.DrawWindow     as Gtk
 import qualified Graphics.UI.Gtk.Gdk.EventM         as Gtk
+import qualified Graphics.UI.Gtk.Gdk.Keys           as Gtk
 import qualified Graphics.UI.Gtk.Gdk.Region         as Gtk
 import qualified Graphics.UI.Gtk.Gdk.Screen         as Gtk
 import qualified Graphics.UI.Gtk.General.General    as Gtk
+import qualified Graphics.UI.Gtk.Misc.EventBox      as Gtk
 import qualified Graphics.UI.Gtk.Windows.Window     as Gtk
 
 #if USE_EVENT_BOX
-import           Data.Word
 import qualified Graphics.UI.Gtk.Abstract.Container as Gtk
+import qualified Graphics.UI.Gtk.Misc.EventBox      as Gtk
+#endif
+
+#if ! USE_CAIRO_SURFACE_BUFFER
 import qualified Graphics.UI.Gtk.Gdk.GC             as Gtk
 import qualified Graphics.UI.Gtk.Gdk.Pixmap         as Gtk
-import qualified Graphics.UI.Gtk.Misc.EventBox      as Gtk
 #endif
 
 import           Diagrams.Backend.Cairo.Internal
@@ -269,6 +275,7 @@ data GtkWindowState
     , thisWindow             :: !(MVar GtkWindowState)
     , gtkWindowLive          :: !(MVar GtkWindowLive)
     , gtkWindow              :: !Gtk.Window
+    , theGtkEventBox         :: !Gtk.EventBox
     , theCairoRenderState    :: !CairoRenderState
     , theInitReaction        :: !(ConnectReact PixSize)
     , theResizeReaction      :: !(ConnectReact PixCoord)
@@ -278,19 +285,11 @@ data GtkWindowState
     , theCursorHandler       :: !(ConnectReact Mouse)
     , theKeyHandler          :: !(ConnectReact Keyboard)
     , theAnimatorThread      :: !(ConnectReact AnimationMoment)
-#if USE_EVENT_BOX
-    , gtkEventBox            :: !Gtk.EventBox
-#endif
     }
 
 data ConnectReact event
   = Disconnected
   | ConnectReact{ doDisconnect :: GtkState (), doReact :: event -> GtkState Bool }
-
-#if ! USE_EVENT_BOX
-gtkEventBox :: GtkWindowState -> Gtk.Window
-gtkEventBox = gtkWindow
-#endif
 
 evalConnectReact :: ConnectReact event -> event -> GtkState Bool
 evalConnectReact = \ case
@@ -301,6 +300,9 @@ forceDisconnect :: Lens' GtkWindowState (ConnectReact event) -> GtkState ()
 forceDisconnect connection = use connection >>= \ case
   ConnectReact{doDisconnect=discon} -> discon >> connection .= Disconnected
   Disconnected -> return ()
+
+gtkEventBox :: Lens' GtkWindowState Gtk.EventBox
+gtkEventBox = lens theGtkEventBox $ \ a b -> a{ theGtkEventBox = b }
 
 cairoRenderState :: Lens' GtkWindowState CairoRenderState
 cairoRenderState = lens theCairoRenderState $ \ a b -> a{ theCairoRenderState = b }
@@ -447,14 +449,11 @@ createWin cfg = do
   uncurry (Gtk.windowSetDefaultSize window) $ cfg ^. recommendWindowSize
   logGUI $ "Gtk.windowSetDecorated " ++ show (cfg ^. decorateWindow)
   Gtk.windowSetDecorated window $ cfg ^. decorateWindow
-#if USE_EVENT_BOX
-  logGUI $ "Gtk.eventBoxNew"
   eventBox <- Gtk.eventBoxNew
-  logGUI $ "Gtk.eventBoxSetVisibleWindow eventBox false"
   Gtk.eventBoxSetVisibleWindow eventBox False
+  Gtk.eventBoxSetAboveChild    eventBox False
   logGUI $ "Gtk.containerAdd window eventBox"
   Gtk.containerAdd window eventBox
-#endif
   this <- newEmptyMVar
   live <- newEmptyMVar
   let env = GtkWindowState
@@ -462,9 +461,9 @@ createWin cfg = do
         , thisWindow               = this
         , gtkWindowLive            = live
         , gtkWindow                = window
+        , theGtkEventBox           = eventBox
         , theCairoRenderState      = CairoRenderState
             { cairoKeepWinSize           = V2 0 0
-            --  , theMinFontExtents          = Nothing
             , theCairoRenderMode         = VectorMode
             , theCairoScreenPrinterState = screenPrinterState
             }
@@ -476,9 +475,6 @@ createWin cfg = do
         , theCursorHandler         = Disconnected
         , theKeyHandler            = Disconnected
         , theAnimatorThread        = Disconnected
-#if USE_EVENT_BOX
-        , gtkEventBox              = eventBox
-#endif
         }
   ((), env) <- flip runGtkState env $ do
     installExposeEventHandler
@@ -521,8 +517,6 @@ installExposeEventHandler = do
 #if USE_CAIRO_SURFACE_BUFFER
             Gtk.renderWithDrawable canvas $ do
               let surf = theCairoSurface livest
-              --w <- Cairo.imageSurfaceGetWidth  surf
-              --h <- Cairo.imageSurfaceGetHeight surf
               liftIO $ logGUI $ "Cairo.setSourceSurface buffer"
               Cairo.setSourceSurface surf  0.0  0.0
               liftIO (Gtk.regionGetRectangles region) >>= mapM_
@@ -908,28 +902,24 @@ instance RenderText CairoRender where
     let fs = st ^. printerFontStyle
     let bgcolor = fs ^. fontBackColor
     let off@(V2 offX offY) = st ^. renderOffset
-    let loc@(TextGridLocation (TextGridRow dbgRow) (TextGridColumn dbgCol)) = st ^. textCursor
-    traceM $ "\nprinch "++show c++" @"++show dbgRow++","++show dbgCol
+    let loc = st ^. textCursor
     loc0@(V2 x0 _y0) <- (+ (off - V2 (2.0) (3.0))) <$> gridTextLocationToPoint loc
     dLoc <- fmap realToFrac <$> getPixSizeOfChar (fs ^. fontSize) c
-    traceM $ "startPoint="++show loc0++" rectSize="++show dLoc
     rendst <- CairoRender get
     --rendst <- case rendst ^. minFontExtents of
     --  Just{}  -> return rendst
     --  Nothing -> do
     --    extns <- cairoRender $ cairoGetMinFontExtents <* cairoSetFontStyle fs
     --    CairoRender $ do
-    --      traceM $ "init minFontDesc "++show (Cairo.fontExtentsDescent extns)
     --      minFontExtents .= Just extns
     --      cairoScreenPrinterState . printerFontStyle .= fs
     --      get
     let loc1@(V2 _x1 y1) = loc0 + dLoc
     extns  <- cairoRender $ do
       Cairo.setOperator Cairo.OperatorSource
-      traceM $ "bgRect "++show loc0++"+"++show dLoc
       cairoDrawRect bgcolor (0.0) bgcolor
         (rect2D & rect2DHead .~ (realToFrac <$> loc0) & rect2DTail .~ (realToFrac <$> loc1))
-      cairoSetColorRGBA32 $ fs ^. fontForeColor
+      cairoSetColor $ fs ^. fontForeColor
       when (rendst ^. cairoScreenPrinterState . printerFontStyle /= fs) (cairoSetFontStyle fs)
       Cairo.fontExtents
     cairoRender $ do
@@ -998,8 +988,8 @@ cairoInvalidate = Cairo.withTargetSurface Cairo.surfaceMarkDirty
 
 -- | Use the Happlets-native color data type 'Happlets.Draw.Color.Color' to set the Cairo
 -- "source" color in the Cairo context.
-cairoSetColorRGBA32 :: Color -> Cairo.Render ()
-cairoSetColorRGBA32 = unpackRGBA32Color >>> \ (r,g,b,a) -> Cairo.setSourceRGBA r g b a
+cairoSetColor :: Color -> Cairo.Render ()
+cairoSetColor = unpackRGBA32Color >>> \ (r,g,b,a) -> Cairo.setSourceRGBA r g b a
 
 -- | Push the graphics context by calling 'Cairo.save' before evaluating a given 'Cario.Render'
 -- function. When evaluation completes, pop the graphics context by calling 'Cairo.restore'.
@@ -1019,7 +1009,7 @@ cairoLineTo = uncurry Cairo.lineTo . view pointXY . fmap unwrapRealApprox
 -- points.
 cairoDrawLine :: LineColor -> LineWidth -> Line2D RealApprox -> Cairo.Render ()
 cairoDrawLine color width line = do
-  cairoSetColorRGBA32 color
+  cairoSetColor color
   Cairo.setLineCap Cairo.LineCapRound
   Cairo.setLineWidth $ unwrapRealApprox width
   cairoMoveTo $ line ^. line2DHead
@@ -1032,7 +1022,7 @@ cairoDrawLine color width line = do
 cairoDrawPath :: LineColor -> LineWidth -> [Point2D RealApprox] -> Cairo.Render ()
 cairoDrawPath color width =
   let run a ax = do
-        cairoSetColorRGBA32 color
+        cairoSetColor color
         Cairo.setLineCap Cairo.LineCapRound
         Cairo.setLineWidth $ unwrapRealApprox width
         Cairo.setLineJoin Cairo.LineJoinMiter
@@ -1043,7 +1033,7 @@ cairoDrawPath color width =
 
 cairoDrawRect :: LineColor -> LineWidth -> FillColor -> Rect2D RealApprox -> Cairo.Render ()
 cairoDrawRect lineColor width fillColor rect = do
-  cairoSetColorRGBA32 fillColor
+  cairoSetColor fillColor
   cairoMoveTo $ rect ^. rect2DHead
   let (head, tail) = (unwrapRealApprox <$> canonicalRect2D rect) ^. rect2DPoints
   let (x, y) = head ^. pointXY
@@ -1051,7 +1041,7 @@ cairoDrawRect lineColor width fillColor rect = do
   Cairo.rectangle x y w h
   Cairo.fill
   when (width > 0.0) $ do
-    cairoSetColorRGBA32 lineColor
+    cairoSetColor lineColor
     Cairo.setLineWidth $ unwrapRealApprox width
     Cairo.setLineJoin Cairo.LineJoinMiter
     Cairo.rectangle x y w h
@@ -1125,7 +1115,7 @@ instance Managed GtkWindow where
       Glib.signalDisconnect focout
 
 instance CanResize GtkWindow where
-  resizeEvents = installEventHandler "resizeEvents" resizeReaction {-[]-} (\ _ _ _ -> return $ pure ())
+  resizeEvents = installEventHandler "resizeEvents" resizeReaction (\ _ _ _ -> return $ pure ())
 
 data AnimationThreadControl
   = AnimationThreadControl
@@ -1137,14 +1127,14 @@ instance CanAnimate GtkWindow where
   animationIsRunning = runGtkStateGUI $
     gets theAnimatorThread <&> \ case { Disconnected -> False; _ -> True; }
   stepFrameEvents react = do
-    flip (installEventHandler "stepFrameEvents" animatorThread {-[]-}) react $ \ logGUI env next -> do
+    flip (installEventHandler "stepFrameEvents" animatorThread) react $ \ logGUI env next -> do
       let rate = env & theAnimationFrameRate . currentConfig
       t0    <- getCurrentTime
       t0ref <- newIORef AnimationThreadControl
         { animationThreadAlive = True
         , animationInitTime    = t0
         }
-      logGUI "Glib.on Glib.timeoutAdd"
+      logGUI "Glib.on timeout"
       frame <- flip Glib.timeoutAdd (min 200 $ floor (1000.0 / rate)) $ do
         AnimationThreadControl{animationThreadAlive=alive,animationInitTime=t0} <- readIORef t0ref
         if not alive then return False else 
@@ -1155,13 +1145,15 @@ instance CanAnimate GtkWindow where
       -- will cause a noticable delay between the time the 'stepFrameEvents' function is evaluated
       -- and the first frame callback is evaluated.
       return $ do
-        logGUI "Glib.signalDisconnect (Glib.on Glib.timeoutAdd)"
+        logGUI "Glib.signalDisconnect (Glib.on timeout)"
         modifyIORef t0ref $ \ ctrl -> ctrl{ animationThreadAlive = False }
         Glib.timeoutRemove frame
 
 instance CanKeyboard GtkWindow where
   keyboardEvents = installEventHandler "keyboardEvents" keyHandler $ \ logGUI env next -> do
-    let box = gtkEventBox env
+    -- Event boxes do not capture key events for some reason. Key handlers must be installed into
+    -- the window widget itself.
+    let box = gtkWindow env
     logGUI "Glib.on Gtk.keyReleaseEvent"
     press   <- Glib.on box Gtk.keyReleaseEvent $
       handleKey False >>= liftIO . next >> return False
@@ -1169,7 +1161,7 @@ instance CanKeyboard GtkWindow where
     release <- Glib.on box Gtk.keyPressEvent $
       handleKey True  >>= liftIO . next >> return False
     return $ do
-      logGUI "Glib.signalDisconnect Gtk.keyReleaseEvent"
+      logGUI "Glib.signalDisconnect [Gtk.keyPressEvent, Gtk.keyReleaseEvent]"
       Glib.signalDisconnect press
       Glib.signalDisconnect release
 
@@ -1177,7 +1169,7 @@ instance CanMouse GtkWindow where
   providedMouseDevices = return []
   mouseEvents = \ case
     MouseButton -> installEventHandler "mouseButtonEvents" mouseHandler $ \ logGUI env next -> do
-      let box = gtkEventBox env
+      let box = env ^. gtkEventBox
       logGUI "Glib.on Gtk.buttonPressEvent"
       press <- Glib.on box Gtk.buttonPressEvent $
         handleMouse True >>= liftIO . next >> return False
@@ -1188,7 +1180,7 @@ instance CanMouse GtkWindow where
         Glib.signalDisconnect press
         Glib.signalDisconnect release
     MouseDrag   -> installEventHandler "mouseDragEvents" mouseHandler $ \ logGUI env next -> do
-      let box = gtkEventBox env
+      let box = env ^. gtkEventBox
       logGUI "Glib.on Gtk.buttonPressEvent"
       press <- Glib.on box Gtk.buttonPressEvent $
         handleMouse True >>= liftIO . next >> return False
@@ -1201,40 +1193,54 @@ instance CanMouse GtkWindow where
       logGUI "Gtk.widgetAddEvents [Gtk.ButtonMotionMask]"
       Gtk.widgetAddEvents box [Gtk.ButtonMotionMask]
       return $ do
-        -- NOTE that you cannot call 'Gtk.widgetDelEvents' unless the widget is not realized. Doing
-        -- so results in an assertion error being thrown in the log file. I assume the previous
-        -- widget mask is restored once the signals are disconnected, but I don't know.
-        logGUI "Glib.signalDisconnect Gtk.buttonPressEvent"
+        logGUI "Glib.signalDisconnect [Gtk.buttonPressEvent, Gtk.buttonReleaseEvent]"
         Glib.signalDisconnect press
         Glib.signalDisconnect release
         Glib.signalDisconnect button
+        -- Gtk has an assertion which disallows calling 'Gtk.widgetDelEvents' while a widget is
+        -- realized. In order to remove the event mask, we must first remove the widget from the
+        -- window container, then add it back again.
+        logGUI "Gtk.containerRemove window eventBox"
+        Gtk.containerRemove (gtkWindow env) box
+        logGUI "Gtk.widgetDelEvents eventBox [Gtk.ButtonMotionMask]"
+        Gtk.widgetDelEvents box [Gtk.ButtonMotionMask]
+        logGUI "Gtk.containerAdd window eventBox"
+        Gtk.containerAdd (gtkWindow env) box
     MouseAll    -> installEventHandler "mouseAllEvents" mouseHandler $ \ logGUI env next -> do
-      let box = gtkEventBox env
-      logGUI "Glib.on Gtk.motionNotifyEvent"
+      let box = env ^. gtkEventBox
       button  <- newIORef False
+      logGUI "Glib.on Gtk.buttonPressEvents"
       press   <- Glib.on box Gtk.buttonPressEvent   $
         liftIO (writeIORef button False) >>
         handleMouse True  >>= liftIO . next >> return False
+      logGUI "Glib.on Gtk.buttonReleaseEvent"
       release <- Glib.on box Gtk.buttonReleaseEvent $
         liftIO (writeIORef button True) >>
         handleMouse False >>= liftIO . next >> return False
+      logGUI "Glib.on Gtk.motionNotifyEvent"
       motion  <- Glib.on box Gtk.motionNotifyEvent  $
         liftIO (readIORef button) >>=
         handleCursor >>= liftIO . next >> return False
       logGUI "Gtk.widgetAddEvents [Gtk.PointerMotionMask, Gtk.ButtonMotionMask]"
       Gtk.widgetAddEvents box [Gtk.PointerMotionMask, Gtk.ButtonMotionMask]
       return $ do
-        -- NOTE that you cannot call 'Gtk.widgetDelEvents' unless the widget is not realized. Doing
-        -- so results in an assertion error being thrown in the log file. I assume the previous
-        -- widget mask is restored once the signals are disconnected, but I don't know.
-        logGUI "Glib.signalDisconnect Gtk.motionNotifyEvent"
+        logGUI "Glib.signalDisconnect [Gtk.buttonPressEvent, Gtk.buttonReleaseEvent, Gtk.motionNotifyEvent]"
         Glib.signalDisconnect press
         Glib.signalDisconnect release
         Glib.signalDisconnect motion
+        -- Gtk has an assertion which disallows calling 'Gtk.widgetDelEvents' while a widget is
+        -- realized. In order to remove the event mask, we must first remove the widget from the
+        -- window container, then add it back again.
+        logGUI "Gtk.containerRemove window eventBox"
+        Gtk.containerRemove (gtkWindow env) box
+        logGUI "Gtk.widgetDelEvents eventBox [Gtk.PointerMotionMask, Gtk.ButtonMotionMask]"
+        Gtk.widgetDelEvents box [Gtk.PointerMotionMask, Gtk.ButtonMotionMask]
+        logGUI "Gtk.containerAdd window eventBox"
+        Gtk.containerAdd (gtkWindow env) box
 
 -- | This function enables an event handler, and takes a continuation which will be evaluated by
 -- this function call to do the low-level work of install the event handler into the Gtk
--- window. This function also does the work of taking a 'Happlets.GUI.GUI' function to be evaluated
+  -- window. This function also does the work of taking a 'Happlets.GUI.GUI' function to be evaluated
 -- on each event, converting this function to a 'ConnectReact' function, and installing it into the
 -- 'GtkWindow's internal state so that it can be actually evaluated every time the low-level event
 -- handler is evaluated. The result is a function that can be used to instantiate any of the
@@ -1265,7 +1271,7 @@ installEventHandler logString connectReact install react = do
             unless stillAlive $ forceDisconnect connectReact
             return stillAlive
         return $ liftIO disconnect
-    liftIO $ logGUI "resizeReaction -- now enabled"
+    liftIO $ logGUI $ logString ++ " -- now enabled"
     connectReact .= ConnectReact
       { doReact = gtkRunHapplet happ (checkGUIContinue logGUI resizeReaction) . react
       , doDisconnect = disconnect
@@ -1292,10 +1298,23 @@ handleCursor upDown = do
 
 handleKey :: Pressed -> Gtk.EventM Gtk.EKey Keyboard
 handleKey upDown = do
-  logGUI <- mkLogger "handleKey" True
-  key  <- Gtk.eventKeyVal
-  mods <- packGtkModifiers <$> Gtk.eventModifierAll
-  let evt = RawKey upDown mods key
+  logGUI  <- mkLogger "handleKey" True
+  keyval  <- Gtk.eventKeyVal
+  keyName <- Gtk.eventKeyName
+  mods    <- packGtkModifiers <$> Gtk.eventModifierAll
+  ch      <- liftIO $ Gtk.keyvalToChar keyval
+  evt     <- liftIO $ case ch of
+    Just ch -> return $ Keyboard upDown mods (CharKey ch)
+    Nothing -> do
+      let sym = Keyboard upDown mods (SymbolKey keyName)
+      return $ case Strict.unpack keyName of
+        ""      -> RawKey upDown mods keyval
+        'F':num -> case readsPrec 0 num of
+          [(i, "")] -> Keyboard upDown mods (FuncKey i)
+          _         -> sym
+        _       -> case Map.lookup keyName keyNameMap of
+          Nothing                   -> sym
+          Just (moreMods, keyPoint) -> Keyboard upDown (mods <> moreMods) keyPoint
   liftIO $ logGUI $ "handleKey " ++ show evt
   return evt
 
@@ -1309,15 +1328,56 @@ getMouseButton = Gtk.eventButton <&> \ case
 packGtkModifiers :: [Gtk.Modifier] -> ModifierBits
 packGtkModifiers = packModifiers .
   ( (=<<) $ \ case
-      Gtk.Shift   -> [Shift]
-      Gtk.Lock    -> [CapsLock]
-      Gtk.Control -> [Ctrl]
-      Gtk.Alt     -> [Alt1]
-      Gtk.Alt2    -> [Alt2]
-      Gtk.Super   -> [Super1]
-      Gtk.Hyper   -> [Super2]
+      Gtk.Shift   -> [ShiftKey]
+      Gtk.Lock    -> [CapsLockKey]
+      Gtk.Control -> [CtrlKey]
+      Gtk.Alt     -> [AltKey]
+      Gtk.Alt2    -> [CommandKey]
+      Gtk.Super   -> [Super1Key]
+      Gtk.Hyper   -> [Super2Key]
       _           -> []
   )
+
+keyNameMap :: Map.Map Strict.Text (ModifierBits, KeyPoint)
+keyNameMap = let k nm key mod = (Strict.pack nm, (packModifiers mod, key)) in Map.fromList
+  [ k "Tab"               TabKey         []
+  , k "Return"            ReturnKey      []
+  , k "BackSpace"         BackSpaceKey   []
+  , k "Escape"            EscapeKey      []
+  , k "Delete"            DeleteKey      []
+  , k "Up"                UpArrowKey     []
+  , k "Down"              DownArrowKey   []
+  , k "Left"              LeftArrowKey   []
+  , k "Right"             RightArrowKey  []
+  , k "Enter"             EnterKey       []
+  , k "Home"              HomeKey        []
+  , k "End"               EndKey         []
+  , k "Menu"              MenuKey        []
+  , k "Insert"            InsertKey      []
+  , k "PageUp"            PageUpKey      []
+  , k "PageDown"          PageDownKey    []
+  , k "Pause"             PauseKey       []
+  , k "Break"             BreakKey       []
+  , k "SysRqKey"          SysRqKey       []
+  , k "Print_Screen"      PrintScreenKey []
+  , k "Scroll_Lock"       ScrollLockKey  []
+  , k "Num_Lock"          NumLockKey     []
+  , k "Kanji"             KanjiKey       []
+  , k "Henkan"            HenkanKey      []
+  , k "Muhenkan"          MuhenkanKey    []
+  , k "Zenkaku_Hankaku"   ZenkakuHankakuKey   []
+  , k "Hiragana_Katakana" HiraganaKatakanaKey []
+  , k "Shift_L"           ModifierOnly   [LeftShiftKey]
+  , k "Shift_R"           ModifierOnly   [RightShiftKey]
+  , k "Alt_L"             ModifierOnly   [LeftAltKey]
+  , k "Alt_R"             ModifierOnly   [RightAltKey]
+  , k "Command_L"         ModifierOnly   [LeftCommandKey]
+  , k "Command_R"         ModifierOnly   [RightCommandKey]
+  , k "Control_L"         ModifierOnly   [LeftCtrlKey]
+  , k "Control_R"         ModifierOnly   [RightCtrlKey]
+  , k "Super_L"           ModifierOnly   [LeftSuper1Key]
+  , k "Super_R"           ModifierOnly   [RightSuper1Key]
+  ]
 
 --screenMasksToGdkRegion :: [ScreenMask] -> (Int, Int) -> IO Gtk.Region
 --screenMasksToGdkRegion masks (w, h) = do
@@ -1552,7 +1612,7 @@ gtkHapplet = Provider
       , theBackgroundGreyValue     = 1.0
       , theRecommendWindowPosition = (0, 30)
       , theRecommendWindowSize     = (800, 600)
-      , theAnimationFrameRate      = 60.0
+      , theAnimationFrameRate      = gtkAnimationFrameRate
       , willDecorateWindow         = True
       , willQuitOnWindowClose      = False
       , willDeleteWindowOnClose    = False
