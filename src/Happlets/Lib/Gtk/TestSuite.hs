@@ -68,14 +68,15 @@ redGridDraw scale winsize = do
     forM_ (around w centerX) $ drawLine red 1.0 . mkLine V2 h
     forM_ (around h centerY) $ drawLine red 1.0 . mkLine (flip V2) w
     screenPrinter $ do
-      textCursor %= (gridRow .~ 1) . (gridColumn .~ 1)
+      gridRow    .= 1
+      gridColumn .= 1
       displayString $ "Grid square size = " ++ show scale
 
 redGridGUI :: TestSuite -> PixSize -> GtkGUI RedGrid ()
 redGridGUI ctx _size = do
   let draw size = use redGridScale >>= onCanvas . flip redGridDraw size
   resizeEvents draw
-  mouseEvents MouseAll $ \ (Mouse _ down _ button pt1@(V2 x y)) -> do
+  mouseEvents MouseAll $ \ mouse@(Mouse _ down _ button pt1@(V2 x y)) -> do
     when down $ case button of
       RightClick -> switchToPulseCircle ctx
       LeftClick  -> do
@@ -88,6 +89,10 @@ redGridGUI ctx _size = do
       Just (V2 x y) -> refreshRegion
         [ rect2D & rect2DHead .~ V2 (x - 22) (y - 22) & rect2DTail .~ V2 (x + 22) (y + 22) ]
     lastMouse .= Just pt1
+    onCanvas $ screenPrinter $ do
+      gridRow    .= 7
+      gridColumn .= 0
+      displayString $ show mouse
     onOSBuffer $ cairoRender $ do
       Cairo.setLineWidth (3.0)
       Cairo.arc (realToFrac x) (realToFrac y) (20.0) (0.0) (2*pi)
