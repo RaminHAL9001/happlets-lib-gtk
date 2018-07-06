@@ -93,7 +93,7 @@ import           Debug.Trace
 -- the debug messages that are selected are included in the compiled binary program.
 
 debugThisModule :: DebugTag
-debugThisModule  = mempty <> _setup <> _drawevt <> _mousevt
+debugThisModule  = mempty
 
 ------------------
 
