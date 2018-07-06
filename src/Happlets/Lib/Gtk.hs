@@ -92,39 +92,51 @@ import           Debug.Trace
 -- include. Constant folding and dead code elimination passes in the optimizer will ensure that ONLY
 -- the debug messages that are selected are included in the compiled binary program.
 
-debugThisModule :: DebugSelector
-debugThisModule  = mempty
+debugThisModule :: DebugTag
+debugThisModule  = mempty <> _setup <> _drawevt <> _mousevt
 
 ------------------
 
-_mousevt, _keyevt, _animevt, _notanimevt, _drawevt, _winevt, _allevt, _ctxevt :: DebugSelector
-_setup, _locks, _infra,  _fulldebug, _allbutanim :: DebugSelector
+-- Debug function selection tags
+_mousevt, _keyevt, _animevt, _notanimevt, _drawevt, _winevt, _allevt, _ctxevt :: DebugTag
+_setup, _locks, _infra,  _fulldebug, _allbutanim :: DebugTag
+_miscA, _miscB :: DebugTag
 
-_mousevt    = DebugSelector 0x00001 -- only mouse events
-_keyevt     = DebugSelector 0x00002 -- only key events
-_animevt    = DebugSelector 0x00004 -- only animation events
-_drawevt    = DebugSelector 0x00008 -- only redraw events
-_ctxevt     = DebugSelector 0x00100 -- only context switching events
-_winevt     = DebugSelector 0x00200 -- window manager related events
+_mousevt    = DebugTag 0x00000001 -- only mouse events
+_keyevt     = DebugTag 0x00000002 -- only key events
+_animevt    = DebugTag 0x00000004 -- only animation events
+_drawevt    = DebugTag 0x00000008 -- only redraw events
+_ctxevt     = DebugTag 0x00000100 -- only context switching events
+_winevt     = DebugTag 0x00000200 -- window manager related events
 _allevt     = _mousevt <> _keyevt <> _animevt <> _drawevt <> _winevt <> _ctxevt
 _notanimevt = _exclude _animevt _allevt -- all events apart from animation events
-_locks      = DebugSelector 0x10000 -- MVar locking and unlocking  -- WARNING: extremely verbose!!!
-_infra  = DebugSelector 0x20000 -- the callback infrastructure -- WARNING: extremely verbose!!!
-_setup      = DebugSelector 0x40000
-_fulldebug  = _setup <> _allevt <> _locks <> _infra
+_locks      = DebugTag 0x00010000 -- MVar locking and unlocking  -- WARNING: extremely verbose!!!
+_infra      = DebugTag 0x00020000 -- the callback infrastructure -- WARNING: extremely verbose!!!
+_setup      = DebugTag 0x00040000
+_miscA      = DebugTag 0x01000000 -- is used to temporarily force a debug message
+_miscB      = DebugTag 0x02000000 -- is used to temporarily force a debug message
+_fulldebug  = _setup <> _allevt <> _locks <> _infra <> _miscA <> _miscB
 _allbutanim = _exclude _animevt _fulldebug
 
-newtype DebugSelector = DebugSelector Word deriving (Eq, Bits)
-instance Semigroup DebugSelector where { (<>) = (.|.); }
-instance Monoid DebugSelector where { mempty = DebugSelector 0; mappend = (<>); }
+-- Two miscelanea tags are provided, '_miscA' and '_miscB'. When looking through the source code in
+-- this file, if you find a debug logging function that you want to force to output, even if it's
+-- ordinary tag is not selected, edit the source code on that log function to match one of the
+-- miscelanea tags. For example, if you want to report on all calls to 'Cairo.renderWith' but not
+-- report on any of the other '_drawevt' tags, then wherever there is a @(logIO _drawevt)@
+-- function reporting on the call of of 'Cairo.renderWith', change the tag to
+-- @(logIO (_drawevt<>_miscA))@ and then set 'debugThisModule' to '_miscA'.
+
+newtype DebugTag = DebugTag Word32 deriving (Eq, Bits)
+instance Semigroup DebugTag where { (<>) = (.|.); }
+instance Monoid DebugTag where { mempty = DebugTag 0; mappend = (<>); }
 
 -- | Exclude A from B
-_exclude :: DebugSelector -> DebugSelector -> DebugSelector
+_exclude :: DebugTag -> DebugTag -> DebugTag
 _exclude excluded selector = selector .&. complement excluded
 
 ----------------------------------------------------------------------------------------------------
 
-type Log m = DebugSelector -> String -> m ()
+type Log m = DebugTag -> String -> m ()
 
 mkLogger
   :: (Monad m, MonadIO m)
@@ -134,26 +146,26 @@ mkLogger func = return $ \ sel msg -> if sel .&. debugThisModule == mempty then 
   traceM $ '[':show tid++"][Happlets.Lib.Gtk."++func++']':msg
 {-# INLINE mkLogger #-}
 
-logSubIO :: Log IO -> DebugSelector -> String -> IO a -> IO a
+logSubIO :: Log IO -> DebugTag -> String -> IO a -> IO a
 logSubIO logIO sel msg f = logIO sel ("[BEGIN] "++msg) >> f <* logIO sel ("[ END ] "++msg)
 {-# INLINE logSubIO #-}
 
-logSubGtk :: Log IO -> DebugSelector -> String -> GtkState a -> GtkState a
+logSubGtk :: Log IO -> DebugTag -> String -> GtkState a -> GtkState a
 logSubGtk logIO sel msg f = get >>=
   liftIO . logSubIO logIO sel msg . runGtkState f >>= state . const
 {-# INLINE logSubGtk #-}
 
-logModMVar :: Log IO -> DebugSelector -> String -> MVar a -> (a -> IO (a, b)) -> IO b
+logModMVar :: Log IO -> DebugTag -> String -> MVar a -> (a -> IO (a, b)) -> IO b
 logModMVar logIO sel label mvar =
   logSubIO logIO (_locks<>sel) ("modifyMVar "++label) . modifyMVar mvar
 {-# INLINE logModMVar #-}
 
-logModMVar_ :: Log IO -> DebugSelector -> String -> MVar a -> (a -> IO a) -> IO ()
+logModMVar_ :: Log IO -> DebugTag -> String -> MVar a -> (a -> IO a) -> IO ()
 logModMVar_ logIO sel label mvar =
   logSubIO logIO (_locks<>sel) ("modifyMVar_ "++label) . modifyMVar_ mvar
 {-# INLINE logModMVar_ #-}
 
-logWithMVar :: Log IO -> DebugSelector -> String -> MVar a -> (a -> IO b) -> IO b
+logWithMVar :: Log IO -> DebugTag -> String -> MVar a -> (a -> IO b) -> IO b
 logWithMVar logIO sel label mvar =
   logSubIO logIO (_locks<>sel) ("withMVar "++label) . withMVar mvar
 {-# INLINE logWithMVar #-}
@@ -320,7 +332,7 @@ data ConnectReact event
 
 evalConnectReact
   :: Log IO
-  -> DebugSelector
+  -> DebugTag
   -> String
   -> Lens' GtkWindowState (ConnectReact event)
   -> event
@@ -333,7 +345,7 @@ evalConnectReact logIO sel what connectReact event = use connectReact >>= \ case
 
 forceDisconnect
   :: Log IO
-  -> DebugSelector
+  -> DebugTag
   -> String
   -> Lens' GtkWindowState (ConnectReact event)
   -> GtkState ()
@@ -418,7 +430,7 @@ runGtkState (GtkState f) = runStateT f
 -- | This function acquires a lock on the 'GtkState' and begins evaluating the 'GtkState'
 -- function. This function should be evaluated at the top level of the procedure that is evaluated
 -- by an event handler.
-lockGtkWindow :: Log IO -> DebugSelector -> GtkWindow -> GtkState a -> IO a
+lockGtkWindow :: Log IO -> DebugTag -> GtkWindow -> GtkState a -> IO a
 lockGtkWindow logIO sel win f = case win of
   GtkLockedWin{} -> error "lockGtkWindow: evaluated on an already locked 'GtkLockedWin' window."
   GtkUnlockedWin mvar -> logModMVar logIO (_locks<>sel) "GtkUnlockedWin" mvar $
@@ -452,7 +464,7 @@ gtkRunHapplet happ f = do
 -- functions which check if the 'Happlets.GUI.GUI' function evaluated to 'Happlets.GUI.disable'.
 checkGUIContinue
   :: Log IO
-  -> DebugSelector
+  -> DebugTag
   -> String
   -> Lens' GtkWindowState (ConnectReact event)
   -> GUIContinue
@@ -466,7 +478,7 @@ checkGUIContinue logIO sel what connectReact = \ case
 
 -- | This function should be evaluated from within a 'GtkGUI' function when it is necessary to
 -- update the 'GtkWindowState', usually this is for installing or removing event handlers.
-runGtkStateGUI :: DebugSelector -> String -> GtkState a -> GtkGUI model a
+runGtkStateGUI :: DebugTag -> String -> GtkState a -> GtkGUI model a
 runGtkStateGUI sel what f = do
   logIO <- mkLogger "runGtkStateGUI"
   getGUIState >>= \ gui -> case theGUIWindow gui of
@@ -567,19 +579,20 @@ installExposeEventHandler = do
           region <- Gtk.eventRegion
           liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
 #if USE_CAIRO_SURFACE_BUFFER
-            Gtk.renderWithDrawable canvas $ do
-              let surf = theCairoSurface livest
-              liftIO $ logIO _drawevt $ "Cairo.setSourceSurface buffer"
-              Cairo.setSourceSurface surf  0.0  0.0
-              liftIO (Gtk.regionGetRectangles region) >>= mapM_
-                (\ (Gtk.Rectangle x y w h) -> do
-                  let f = realToFrac :: Int -> Double
-                  liftIO $ logIO _drawevt $ unwords
-                    ["Cairo.rectangle", show x, show y, show w, show h, ">> Cairo.paint"]
-                  Cairo.setOperator Cairo.OperatorSource
-                  Cairo.rectangle (f x) (f y) (f w) (f h)
-                  Cairo.paint
-                )
+            logSubIO logIO _drawevt "Gtk.renderWithDrawable -- Gtk.exposeEvent" $
+              Gtk.renderWithDrawable canvas $ do
+                let surf = theCairoSurface livest
+                liftIO $ logIO _drawevt $ "Cairo.setSourceSurface buffer"
+                Cairo.setSourceSurface surf  0.0  0.0
+                liftIO (Gtk.regionGetRectangles region) >>= mapM_
+                  (\ (Gtk.Rectangle x y w h) -> do
+                    let f = realToFrac :: Int -> Double
+                    liftIO $ logIO _drawevt $ unwords
+                      ["Cairo.rectangle", show x, show y, show w, show h, ">> Cairo.paint"]
+                    Cairo.setOperator Cairo.OperatorSource
+                    Cairo.rectangle (f x) (f y) (f w) (f h)
+                    Cairo.paint
+                  )
 #else
             logIO _drawevt $ "Gtk.gcSetClipRegion"
             Gtk.gcSetClipRegion (theGtkGraphCtx livest) region
@@ -610,8 +623,8 @@ installInitEventHandler = do
       liftIO $ lockGtkWindow logIO _setup (GtkUnlockedWin $ thisWindow env) $ do
         live   <- gets gtkWindowLive
         liftIO $ do
-          logIO _setup $ "newGtkWindowLive (dimsForAlloc " ++
-            show size ++ " --> " ++ show allocSize ++ ")"
+          logIO _setup $
+            "newGtkWindowLive (dimsForAlloc " ++ show size ++ " --> " ++ show allocSize ++ ")"
           livest <- newGtkWindowLive (currentConfig env) canvas allocSize
           logIO _setup "putMVar gtkWindowLive"
           putMVar live livest
@@ -642,7 +655,7 @@ installResizeEventHandler = do
           resizeGtkDrawContext canvas size
         evalConnectReact logIO _winevt "resizeReaction" resizeReaction evt
         liftIO $ do
-          logIO _winevt "Gtk.widgetQueueDraw"
+          logIO _drawevt "Gtk.widgetQueueDraw"
           Gtk.widgetQueueDraw (gtkWindow env)
           return False
 
@@ -844,10 +857,6 @@ gtkSetHapplet newHapp init = do
           win  <- liftM fst $ onHapplet newHapp $ liftM (theGUIWindow &&& theGUIModel) .
             logSubIO logIO _ctxevt "-- call happlet initializer" .
             evalGUI (init $ sampCoord <$> uncurry V2 size) newHapp (GtkLockedWin env)
-          --logGUI "Gtk.widgetQueueDraw"
-          --Gtk.widgetQueueDraw $ gtkWindow win
-          --logGUI "Gtk.widgetShow"
-          --Gtk.widgetShow $ gtkWindow win
           return $ case win of
             GtkLockedWin env -> (GUIContinue, env)
               -- When 'gtkSetHapplet' is called, it must be called from within a GUI event handler.
@@ -877,17 +886,17 @@ evalCairoOnCanvas redraw = do
     logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
       (w, h) <- Gtk.drawableGetSize (gtkDrawWindow livest)
 #if USE_CAIRO_SURFACE_BUFFER
-      let cairoRenderer = logSubIO logIO _drawevt "Cairo.renderWith" .
+      let cairoRenderer = logSubIO logIO _drawevt "Cairo.renderWith onCanvas" .
             Cairo.renderWith (theCairoSurface livest)
 #else
-      let cairoRenderer = logSubIO logIO _drawevt "Gtk.renderWithDrawable -- to theGtkPixmap" .
+      let cairoRenderer = logSubIO logIO _drawevt "Gtk.renderWithDrawable onCanvas" .
             Gtk.renderWithDrawable (theGtkPixmap livest)
 #endif
       (a, rendst) <- cairoRenderer $
         runCairoRender (sampCoord <$> V2 w h) (env ^. cairoRenderState) redraw
-      region <- Gtk.regionRectangle $ Gtk.Rectangle 0 0 w h
-      logIO _drawevt "Gtk.drawWindowInvalidateRegion"
-      Gtk.drawWindowInvalidateRegion (gtkDrawWindow livest) region True
+      --region <- Gtk.regionRectangle $ Gtk.Rectangle 0 0 w h
+      --logIO _drawevt "Gtk.drawWindowInvalidateRegion"
+      --Gtk.drawWindowInvalidateRegion (gtkDrawWindow livest) region True
       return (a, rendst)
   cairoRenderState .= rendst
   return a
@@ -900,7 +909,7 @@ evalCairoOnGtkDrawable redraw = do
   (a, rendst) <- liftIO $
     logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
       (w, h) <- Gtk.drawableGetSize (gtkDrawWindow livest)
-      (a, rendst) <- logSubIO logIO _drawevt "Gtk.renderWithDrawable" $
+      (a, rendst) <- logSubIO logIO _drawevt "Gtk.renderWithDrawable onOSBuffer" $
         Gtk.renderWithDrawable (gtkDrawWindow livest) $
         runCairoRender (sampCoord <$> V2 w h) (env ^. cairoRenderState) redraw
       return (a, rendst)
@@ -926,23 +935,25 @@ instance HappletWindow GtkWindow CairoRender where
     logIO <- mkLogger "refreshRegion"
     env <- get
     liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $ \ livest ->
-      Gtk.renderWithDrawable (gtkDrawWindow livest) $
-        forM_ (fmap realToFrac . canonicalRect2D <$> rects) $ \ rect -> do
-          Cairo.setOperator Cairo.OperatorSource
-          Cairo.setSourceSurface (theCairoSurface livest) (0.0) (0.0)
-          let (x, y) = (rect) ^. rect2DHead . pointXY
-          let (w, h) = ((rect ^. rect2DTail) - (rect ^. rect2DHead)) ^. pointXY
-          Cairo.rectangle x y w h
-          Cairo.fill
+      logSubIO logIO _drawevt "Gtk.renderWithDrawable refreshRegion" $
+        Gtk.renderWithDrawable (gtkDrawWindow livest) $
+          forM_ (fmap realToFrac . canonicalRect2D <$> rects) $ \ rect -> do
+            Cairo.setOperator Cairo.OperatorSource
+            Cairo.setSourceSurface (theCairoSurface livest) (0.0) (0.0)
+            let (x, y) = (rect) ^. rect2DHead . pointXY
+            let (w, h) = ((rect ^. rect2DTail) - (rect ^. rect2DHead)) ^. pointXY
+            Cairo.rectangle x y w h
+            Cairo.fill
 
   refreshWindow      = runGtkStateGUI _drawevt "refreshWindow" $ do
     logIO <- mkLogger "refreshWindow"
     env <- get
     liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
-      Gtk.renderWithDrawable (gtkDrawWindow livest) $ do
-        Cairo.setOperator Cairo.OperatorSource
-        Cairo.setSourceSurface (theCairoSurface livest) (0.0) (0.0)
-        Cairo.paint
+      logSubIO logIO _drawevt "Gtk.renderWithDrawable refreshWindow" $
+        Gtk.renderWithDrawable (gtkDrawWindow livest) $ do
+          Cairo.setOperator Cairo.OperatorSource
+          Cairo.setSourceSurface (theCairoSurface livest) (0.0) (0.0)
+          Cairo.paint
 
 instance Happlet2DGraphics CairoRender where
   clearScreen = unpackRGBA32Color >>> \ (r,g,b,a) -> cairoRender $ cairoClearCanvas r g b a
@@ -1330,10 +1341,10 @@ instance CanMouse GtkWindow where
 -- "Happlets.GUI" module's event handler classes.
 installEventHandler
   :: Show event
-  => DebugSelector
+  => DebugTag
   -> String
   -> Lens' GtkWindowState (ConnectReact event)
-  -> (Log IO -> DebugSelector -> GtkWindowState -> (event -> IO ()) -> IO (IO ()))
+  -> (Log IO -> DebugTag -> GtkWindowState -> (event -> IO ()) -> IO (IO ()))
   -> (event -> GtkGUI model ())
   -> GtkGUI model ()
 installEventHandler sel what connectReact install react = do
@@ -1567,7 +1578,7 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
       logIO <- mkLogger "newImageBuffer"
       logIO _drawevt $ unwords ["Cairo.createImageSurface Cairo.FormatARGB32", show w, show h]
       surface <- Cairo.createImageSurface Cairo.FormatARGB32 (fromIntegral w) (fromIntegral h)
-      (a, rendst) <- logSubIO logIO _drawevt "Cairo.renderWith" $
+      (a, rendst) <- logSubIO logIO _drawevt "Cairo.renderWith newImageBuffer" $
         Cairo.renderWith surface $ runCairoRender size rendst draw
       mvar <- newMVar surface
       return (a, rendst, GtkImage{gtkCairoSurfaceMVar=mvar})
@@ -1588,7 +1599,7 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
             logIO _drawevt $
               unwords ["Cairo.createImageSurface Cairo.FormatARGB32", show w, show h]
             Cairo.createImageSurface Cairo.FormatARGB32 (fromIntegral w) (fromIntegral h)
-          (a, rendst) <- logSubIO logIO _drawevt "Cairo.renderWith" $
+          (a, rendst) <- logSubIO logIO _drawevt "Cairo.renderWith resizeImageBuffer" $
             Cairo.renderWith surface $ runCairoRender size rendst draw
           return (surface, (a, rendst))
       cairoRenderState .= rendst
@@ -1599,11 +1610,10 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
     (a, rendst) <- liftIO $ do
       logIO <- mkLogger "drawImage"
       logWithMVar logIO _drawevt "gtkCairoSurfaceMVar" mvar $ \ surface -> do
-        logIO _drawevt "Cairo.renderWith draw"
         size <- V2
           <$> Cairo.imageSurfaceGetWidth  surface
           <*> Cairo.imageSurfaceGetHeight surface
-        logSubIO logIO _drawevt "Cairo.renderWith" $
+        logSubIO logIO _drawevt "Cairo.renderWith drawImage" $
           Cairo.renderWith surface $ runCairoRender (sampCoord <$> size) rendst draw
     cairoRenderState .= rendst
     return a
@@ -1614,7 +1624,7 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
     liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" liveMVar $ \ liveEnv ->
       logSubIO logIO _drawevt "modifyMVar gtkCairoSurfaceMVar" $
         logWithMVar logIO _drawevt "gtkCairoSurfaceMVar" mvar $ \ surface ->
-          logSubIO logIO _drawevt "Cairo.renderWith" $
+          logSubIO logIO _drawevt "Cairo.renderWith blitImage" $
             Cairo.renderWith (theCairoSurface liveEnv) $ do
               let (V2 x y) = realToFrac <$> offset
               liftIO $ logIO _drawevt $
@@ -1629,7 +1639,7 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
         logIO <- mkLogger "blitImageTo"
         logWithMVar logIO _drawevt "blitSource" src $ \ src ->
           logWithMVar logIO _drawevt "blitTarget" targ $ \ targ ->
-            logSubIO logIO _drawevt "Cairo.renderWith" $ Cairo.renderWith targ $ do
+            logSubIO logIO _drawevt "Cairo.renderWith blitImageTo" $ Cairo.renderWith targ $ do
               let (V2 x y) = realToFrac <$> offset
               liftIO $ logIO _drawevt $ unwords
                 ["Cairo.setSourceSurface", show x, show y, ">> Cairo.paint"]
@@ -1643,7 +1653,7 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
     logIO _drawevt $ unwords ["Gtk.pixmapNew", show w, show h]
     pixmap <- Gtk.pixmapNew (Nothing :: Maybe Gtk.Pixmap)
       (fromIntegral w) (fromIntegral h) (Just 32)
-    logSubIO _drawevt "Gtk.renderWithDrawable" $
+    logSubIO _drawevt "Gtk.renderWithDrawable newImageBuffer" $
       Gtk.renderWithDrawable pixmap $ runCairoRender draw
     mvar <- newMVar pixmap
     return GtkImage
@@ -1655,14 +1665,14 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
     liftIO $ logModMVar logIO _drawevt mvar $ \ pixmap -> do
       logIO _drawevt $ unwords ["Gtk.pixmapNew", show w, show h]
       pixmap <- Gtk.pixmapNew (Just pixmap) (fromIntegral w) (fromIntegral h) (Just 32)
-      a <- logSubIO _drawevt "Gtk.renderWithDrawable" $
+      a <- logSubIO _drawevt "Gtk.renderWithDrawable resizeImageBuffer" $
         Gtk.renderWithDrawable pixmap $ runCairoRender draw
       return (pixmap, a)
 
   drawImage (GtkImage{gtkPixmapMVar=mvar}) draw = do
     logIO <- mkLogger "drawImage"
     liftIO $ logWithMVar logIO _drawevt mvar $
-      logIO _drawevt "Gtk.renderWithDrawable" .
+      logIO _drawevt "Gtk.renderWithDrawable drawImage" .
       flip Gtk.renderWithDrawable (runCairoRender draw)
 
   blitImage (GtkImage{gtkPixmapMVar=mvar}) offset = runGtkStateGUI $ do
