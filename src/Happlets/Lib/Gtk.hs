@@ -574,34 +574,12 @@ installExposeEventHandler = do
         takeMVar initExposeEventMVar >>= Glib.signalDisconnect
         logIO _drawevt "Glib.on window Gtk.exposeEvent"
         Glib.on (gtkWindow env) Gtk.exposeEvent $ do
-          logIO <- mkLogger "exposeEventCallback"
+          logIO  <- mkLogger "exposeEventHandler"
           canvas <- Gtk.eventWindow
           region <- Gtk.eventRegion
-          liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
-#if USE_CAIRO_SURFACE_BUFFER
-            logSubIO logIO _drawevt "Gtk.renderWithDrawable -- Gtk.exposeEvent" $
-              Gtk.renderWithDrawable canvas $ do
-                let surf = theCairoSurface livest
-                liftIO $ logIO _drawevt $ "Cairo.setSourceSurface buffer"
-                Cairo.setSourceSurface surf  0.0  0.0
-                liftIO (Gtk.regionGetRectangles region) >>= mapM_
-                  (\ (Gtk.Rectangle x y w h) -> do
-                    let f = realToFrac :: Int -> Double
-                    liftIO $ logIO _drawevt $ unwords
-                      ["Cairo.rectangle", show x, show y, show w, show h, ">> Cairo.paint"]
-                    Cairo.setOperator Cairo.OperatorSource
-                    Cairo.rectangle (f x) (f y) (f w) (f h)
-                    Cairo.paint
-                  )
-#else
-            logIO _drawevt $ "Gtk.gcSetClipRegion"
-            Gtk.gcSetClipRegion (theGtkGraphCtx livest) region
-            (w, h) <- Gtk.drawableGetSize (theGtkPixmap livest)
-            logIO _drawevt $ unwords ["Gtk.drawRectangle 0 0", show w, show h]
-            Gtk.drawRectangle canvas (theGtkGraphCtx livest) True 0 0 w h
-#endif
+          liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $
+            exposeEventHandler logIO canvas region
           return True
-        ------------------------------------------------------------------------------------
         return True
 
 -- | The init event handler was responsible for pulling the init GUI function from the
@@ -894,7 +872,8 @@ evalCairoOnCanvas redraw = do
 #endif
       (a, rendst) <- cairoRenderer $
         runCairoRender (sampCoord <$> V2 w h) (env ^. cairoRenderState) redraw
-      --region <- Gtk.regionRectangle $ Gtk.Rectangle 0 0 w h
+      region <- Gtk.regionRectangle $ Gtk.Rectangle 0 0 w h -- TODO: minimize the size of this region
+      exposeEventHandler logIO (gtkDrawWindow livest) region livest
       --logIO _drawevt "Gtk.drawWindowInvalidateRegion"
       --Gtk.drawWindowInvalidateRegion (gtkDrawWindow livest) region True
       return (a, rendst)
@@ -915,6 +894,31 @@ evalCairoOnGtkDrawable redraw = do
       return (a, rendst)
   cairoRenderState .= rendst
   return a
+
+exposeEventHandler :: Log IO -> Gtk.DrawWindow -> Gtk.Region -> GtkWindowLive -> IO ()
+exposeEventHandler logIO canvas region livest = do
+#if USE_CAIRO_SURFACE_BUFFER
+  logSubIO logIO _drawevt "Gtk.renderWithDrawable -- Gtk.exposeEvent" $
+    Gtk.renderWithDrawable canvas $ do
+      let surf = theCairoSurface livest
+      liftIO $ logIO _drawevt $ "Cairo.setSourceSurface buffer"
+      Cairo.setSourceSurface surf  0.0  0.0
+      liftIO (Gtk.regionGetRectangles region) >>= mapM_
+        (\ (Gtk.Rectangle x y w h) -> do
+          let f = realToFrac :: Int -> Double
+          liftIO $ logIO _drawevt $ unwords
+            ["Cairo.rectangle", show x, show y, show w, show h, ">> Cairo.paint"]
+          Cairo.setOperator Cairo.OperatorSource
+          Cairo.rectangle (f x) (f y) (f w) (f h)
+          Cairo.paint
+        )
+#else
+  logIO _drawevt $ "Gtk.gcSetClipRegion"
+  Gtk.gcSetClipRegion (theGtkGraphCtx livest) region
+  (w, h) <- Gtk.drawableGetSize (theGtkPixmap livest)
+  logIO _drawevt $ unwords ["Gtk.drawRectangle 0 0", show w, show h]
+  Gtk.drawRectangle canvas (theGtkGraphCtx livest) True 0 0 w h
+#endif
 
 ----------------------------------------------------------------------------------------------------
 
