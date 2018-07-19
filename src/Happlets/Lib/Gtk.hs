@@ -474,6 +474,7 @@ checkGUIContinue logIO sel what connectReact = \ case
     forceDisconnect logIO (_infra<>sel) (what++"(on GUIHalt)") connectReact
   GUIFail msg ->
     forceDisconnect logIO (_infra<>sel) (what++"(on GUIFail "++show msg++")") connectReact
+  GUICancel   -> return ()
   GUIContinue -> liftIO $ logIO (_infra<>sel) $ what++"-- evaluated to 'GUIContinue'"
 
 -- | This function should be evaluated from within a 'GtkGUI' function when it is necessary to
