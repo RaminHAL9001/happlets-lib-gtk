@@ -214,6 +214,7 @@ data CairoRenderState
   = CairoRenderState
     { cairoKeepWinSize           :: !PixSize
     --  , theMinFontExtents          :: !(Maybe Cairo.FontExtents)
+    , theCanvasResizeMode        :: !CanvasMode
     , theCairoRenderMode         :: !CairoRenderMode
     , theCairoScreenPrinterState :: !ScreenPrinterState
     }
@@ -223,6 +224,9 @@ data CairoRenderState
 
 cairoRenderMode :: Lens' CairoRenderState CairoRenderMode
 cairoRenderMode = lens theCairoRenderMode $ \ a b -> a{ theCairoRenderMode = b }
+
+canvasResizeMode :: Lens' CairoRenderState CanvasMode
+canvasResizeMode = lens theCanvasResizeMode $ \ a b -> a{ theCanvasResizeMode = b }
 
 cairoScreenPrinterState :: Lens' CairoRenderState ScreenPrinterState
 cairoScreenPrinterState = lens theCairoScreenPrinterState $ \ a b ->
@@ -310,20 +314,22 @@ data GtkWindowLive
 
 data GtkWindowState
   = GtkWindowState
-    { currentConfig          :: !Config
-    , thisWindow             :: !(MVar GtkWindowState)
-    , gtkWindowLive          :: !(MVar GtkWindowLive)
-    , gtkWindow              :: !Gtk.Window
-    , theGtkEventBox         :: !Gtk.EventBox
-    , theCairoRenderState    :: !CairoRenderState
-    , theInitReaction        :: !(ConnectReact PixSize)
-    , theResizeReaction      :: !(ConnectReact PixCoord)
-    , theVisibilityReaction  :: !(ConnectReact Bool)
-    , theFocusReaction       :: !(ConnectReact Bool)
-    , theMouseHandler        :: !(ConnectReact Mouse)
-    , theKeyHandler          :: !(ConnectReact Keyboard)
-    , theAnimatorThread      :: !(ConnectReact AnimationMoment)
-    , theContextSwitcher     :: GUIContinue -> GtkWindowState -> IO (GUIContinue, GtkWindowState)
+    { currentConfig           :: !Config
+    , thisWindow              :: !(MVar GtkWindowState)
+    , gtkWindowLive           :: !(MVar GtkWindowLive)
+    , gtkWindow               :: !Gtk.Window
+    , theGtkEventBox          :: !Gtk.EventBox
+    , theGtkCurrentWindowSize :: !PixSize
+    , theCairoRenderState     :: !CairoRenderState
+    , theInitReaction         :: !(ConnectReact PixSize)
+    , theResizeReaction       :: !(ConnectReact (OldPixSize, NewPixSize))
+    , theVisibilityReaction   :: !(ConnectReact Bool)
+    , theFocusReaction        :: !(ConnectReact Bool)
+    , theMouseHandler         :: !(ConnectReact Mouse)
+    , theKeyHandler           :: !(ConnectReact Keyboard)
+    , theDetatchHandler       :: !(ConnectReact ())
+    , theAnimatorThread       :: !(ConnectReact AnimationMoment)
+    , theContextSwitcher      :: !(GtkState ())
     }
 
 data ConnectReact event
@@ -362,6 +368,9 @@ gtkEventBox = lens theGtkEventBox $ \ a b -> a{ theGtkEventBox = b }
 cairoRenderState :: Lens' GtkWindowState CairoRenderState
 cairoRenderState = lens theCairoRenderState $ \ a b -> a{ theCairoRenderState = b }
 
+gtkCurrentWindowSize :: Lens' GtkWindowState PixSize
+gtkCurrentWindowSize = lens theGtkCurrentWindowSize $ \ a b -> a{ theGtkCurrentWindowSize = b }
+
 initReaction :: Lens' GtkWindowState (ConnectReact PixSize)
 initReaction = lens theInitReaction $ \ a b -> a{ theInitReaction = b }
 
@@ -371,7 +380,7 @@ visibilityReaction = lens theVisibilityReaction $ \ a b -> a{ theVisibilityReact
 focusReaction :: Lens' GtkWindowState (ConnectReact Bool)
 focusReaction = lens theFocusReaction $ \ a b -> a{ theFocusReaction = b }
 
-resizeReaction :: Lens' GtkWindowState (ConnectReact PixCoord)
+resizeReaction :: Lens' GtkWindowState (ConnectReact (OldPixSize, NewPixSize))
 resizeReaction = lens theResizeReaction $ \ a b -> a{ theResizeReaction = b }
 
 mouseHandler :: Lens' GtkWindowState (ConnectReact Mouse)
@@ -380,13 +389,19 @@ mouseHandler = lens theMouseHandler $ \ a b -> a{ theMouseHandler = b }
 keyHandler :: Lens' GtkWindowState (ConnectReact Keyboard)
 keyHandler = lens theKeyHandler $ \ a b -> a{ theKeyHandler = b }
 
+detatchHandler :: Lens' GtkWindowState (ConnectReact ())
+detatchHandler = lens theDetatchHandler $ \ a b -> a{ theDetatchHandler = b }
+
+-- When a context switch is performed, this value is set with a continuation to be called after the
+-- 'windowChangeHapplet' function completes. After evaluation of the 'GtkGUI' function completes,
+-- the state is evaluated -- every single event handler will evaluate this function. To ensure that
+-- nothing happens unless it is set, this lens is used to set the callback to @return ()@ (a no-op)
+-- prior to evaluation of the 'GtkGUI' procedure in the 'liftGUIintoGtkState' function.
+contextSwitcher :: Lens' GtkWindowState (GtkState ())
+contextSwitcher = lens theContextSwitcher $ \ a b -> a{ theContextSwitcher = b }
+
 animatorThread :: Lens' GtkWindowState (ConnectReact AnimationMoment)
 animatorThread = lens theAnimatorThread $ \ a b -> a{ theAnimatorThread = b }
-
-contextSwitcher
-  :: Lens' GtkWindowState
-      (GUIContinue -> GtkWindowState -> IO (GUIContinue, GtkWindowState))
-contextSwitcher = lens theContextSwitcher $ \ a b -> a{ theContextSwitcher = b }
 
 -- Create an image buffer with an alpha channel for a 'Graphics.UI.Gtk.Abstract.Widget.Widget' to
 -- be rendered.
@@ -432,9 +447,10 @@ runGtkState (GtkState f) = runStateT f
 -- by an event handler.
 lockGtkWindow :: Log IO -> DebugTag -> GtkWindow -> GtkState a -> IO a
 lockGtkWindow logIO sel win f = case win of
-  GtkLockedWin{} -> error "lockGtkWindow: evaluated on an already locked 'GtkLockedWin' window."
   GtkUnlockedWin mvar -> logModMVar logIO (_locks<>sel) "GtkUnlockedWin" mvar $
     liftM (\ (a, b) -> (b, a)) . runGtkState f
+  GtkLockedWin{}      -> fail
+    "lockGtkWindow: evaluated on an already locked 'GtkLockedWin' window."
 
 -- | This function evaluates 'Happlets.GUI.GUI' functions within event handlers. It evaluates to a
 -- 'GtkState' function, which means you are required to have first evaluated 'unlockGtkWindow'. This
@@ -442,48 +458,54 @@ lockGtkWindow logIO sel win f = case win of
 -- function. If the 'Happlets.GUI.GUI' function evaluates to 'Happlets.GUI.disable' or
 -- 'Happlets.GUI.failGUI', then this function returns 'Prelude.False'. Otherwise, 'Prelude.True' is
 -- returned.
-gtkRunHapplet :: Happlet model -> GtkGUI model void -> GtkState GUIContinue
-gtkRunHapplet happ f = do
-  logIO <- mkLogger "gtkRunHapplet"
-  -- Set a default context switcher.
-  contextSwitcher .= curry return
-  env <- get
-  liftIO $ logIO _locks $ "locking Happlet, evaluating GUI function..."
-  ((env, guiContin), _) <- liftIO $ onHapplet happ $ \ model -> do
-    gui <- logSubIO logIO _infra "evalGUI -- begin callback" $
-      evalGUI f happ (GtkLockedWin env) model
-    let env = case theGUIWindow gui of
-          GtkLockedWin env -> env
-          GtkUnlockedWin{} -> error
-            "gtkRunHapplet: evalGUI evaluated on GtkLockedWin but returned GtkUnlockedWin"
-    return ((env, theGUIContinue gui), theGUIModel gui)
-  (guiContin, env) <- liftIO $ theContextSwitcher env guiContin env
-  state $ const (guiContin, env & contextSwitcher .~ curry return)
+liftGUIintoGtkState :: Happlet model -> GtkGUI model a -> GtkState (EventHandlerControl a)
+liftGUIintoGtkState happlet f = do
+  logIO <- mkLogger "liftGUIintoGtkState"
+  -- (1) Always set 'contextSwitcher' to a no-op, it may be set to something else by @f@.
+  contextSwitcher .= return ()
+  winst <- get
+  (result, _) <- liftIO $
+    logSubIO logIO _locks "Lock Happlet, evaluate GUI function." $ 
+      onHapplet happlet $ \ model -> do
+        (guiContin, guist) <- logSubIO logIO _infra "call runGUI" $
+          runGUI f GUIState
+            { theGUIHapplet = happlet
+            , theGUIWindow  = GtkLockedWin winst
+            , theGUIModel   = model
+            }
+        case theGUIWindow guist of
+          GtkLockedWin winst -> return ((guiContin, winst), theGUIModel guist)
+          GtkUnlockedWin{}   -> fail $
+            "'runGUI' successfully completed, but returned state containing a locked window."
+  -- (2) If it was not changed by @f@ between (1) and (2), it is still a no-op.
+  liftIO $ logIO _ctxevt $ "Check if 'contextSwitcher' was set."
+  join $ use contextSwitcher
+  state $ const result
 
--- | This function is intended to be passed as a parameter to 'gtkRunHapplet' by event handling
+-- | This function is intended to be passed as a parameter to 'liftGUIintoGtkState' by event handling
 -- functions which check if the 'Happlets.GUI.GUI' function evaluated to 'Happlets.GUI.disable'.
 checkGUIContinue
   :: Log IO
   -> DebugTag
   -> String
   -> Lens' GtkWindowState (ConnectReact event)
-  -> GUIContinue
+  -> EventHandlerControl a
   -> GtkState ()
 checkGUIContinue logIO sel what connectReact = \ case
-  GUIHalt     ->
-    forceDisconnect logIO (_infra<>sel) (what++"(on GUIHalt)") connectReact
-  GUIFail msg ->
-    forceDisconnect logIO (_infra<>sel) (what++"(on GUIFail "++show msg++")") connectReact
-  GUICancel   -> return ()
-  GUIContinue -> liftIO $ logIO (_infra<>sel) $ what++"-- evaluated to 'GUIContinue'"
+  EventHandlerHalt       ->
+    forceDisconnect logIO (_infra<>sel) (what++"(on EventHandlerHalt)") connectReact
+  EventHandlerFail   msg ->
+    forceDisconnect logIO (_infra<>sel) (what++"(on EventHandlerFail "++show msg++")") connectReact
+  EventHandlerCancel     -> return ()
+  EventHandlerContinue{} -> liftIO $ logIO (_infra<>sel) $ what++"-- evaluated to 'GUIControl'"
 
 -- | This function should be evaluated from within a 'GtkGUI' function when it is necessary to
 -- update the 'GtkWindowState', usually this is for installing or removing event handlers.
-runGtkStateGUI :: DebugTag -> String -> GtkState a -> GtkGUI model a
-runGtkStateGUI sel what f = do
-  logIO <- mkLogger "runGtkStateGUI"
+liftGtkStateIntoGUI :: DebugTag -> String -> GtkState a -> GtkGUI model a
+liftGtkStateIntoGUI sel what f = do
+  logIO <- mkLogger "liftGtkStateIntoGUI"
   getGUIState >>= \ gui -> case theGUIWindow gui of
-    GtkUnlockedWin{} -> error $ "runGtkStateGUI: " ++
+    GtkUnlockedWin{} -> error $ "liftGtkStateIntoGUI: " ++
       "Evaluated a GtkState function within a GtkGUI function on a locked GtkWindow."
       -- The 'window' value passed to the 'evalGUI' function must be a 'GtkLockedWin' constructor.
     GtkLockedWin env -> do
@@ -526,9 +548,11 @@ createWin cfg = do
         , thisWindow               = this
         , gtkWindowLive            = live
         , gtkWindow                = window
+        , theGtkCurrentWindowSize  = V2 0 0
         , theGtkEventBox           = eventBox
         , theCairoRenderState      = CairoRenderState
             { cairoKeepWinSize           = V2 0 0
+            , theCanvasResizeMode        = ClearCanvasMode
             , theCairoRenderMode         = VectorMode
             , theCairoScreenPrinterState = screenPrinterState
             }
@@ -538,8 +562,9 @@ createWin cfg = do
         , theFocusReaction         = Disconnected
         , theMouseHandler          = Disconnected
         , theKeyHandler            = Disconnected
+        , theDetatchHandler        = Disconnected
         , theAnimatorThread        = Disconnected
-        , theContextSwitcher       = curry return
+        , theContextSwitcher       = return ()
         }
   ((), env) <- flip runGtkState env $ do
     installExposeEventHandler
@@ -628,11 +653,12 @@ installResizeEventHandler = do
       logIO  <- mkLogger "configureEventCallback"
       canvas <- Gtk.eventWindow
       size   <- Gtk.eventSize
-      let evt = sampCoord <$> uncurry V2 size
+      let evt = (env ^. gtkCurrentWindowSize, sampCoord <$> uncurry V2 size)
       liftIO $ lockGtkWindow logIO _winevt (GtkUnlockedWin $ thisWindow env) $ do
         logSubGtk logIO _winevt ("resizeGtkDrawContext "++show size) $
           resizeGtkDrawContext canvas size
         evalConnectReact logIO _winevt "resizeReaction" resizeReaction evt
+        gtkCurrentWindowSize .= snd evt
         liftIO $ do
           logIO _drawevt "Gtk.widgetQueueDraw"
           Gtk.widgetQueueDraw (gtkWindow env)
@@ -777,7 +803,7 @@ gtkNewWindow cfg = do
 gtkWindowVisible :: Bool -> GtkGUI model ()
 gtkWindowVisible visible = do
   logIO <- mkLogger ("gtkWindowVisible "++show visible)
-  runGtkStateGUI _winevt ("gtkWindowVisible "++show visible) $ do
+  liftGtkStateIntoGUI _winevt ("gtkWindowVisible "++show visible) $ do
     env <- get
     liftIO $ if visible
      then do
@@ -789,28 +815,35 @@ gtkWindowVisible visible = do
       logIO _winevt "Gtk.widgetHideAll"
       Gtk.widgetHideAll (gtkWindow env)
 
+-- | This is the function behind the Happlet public API 'Happlets.Initialize.attachWindow'.
 gtkAttachHapplet :: Bool -> GtkWindow -> Happlet model -> (PixSize -> GtkGUI model ()) -> IO ()
 gtkAttachHapplet showWin win happ init = do
   logIO <- mkLogger "gtkAttachHapplet"
   lockGtkWindow logIO _ctxevt win $ do
     disconnectAll logIO
     initReaction .= ConnectReact
-      { doDisconnect = return () -- This function is disconnected automatically by the init callback.
+      { doDisconnect = return () -- no need, is disconnected automatically by the init callback.
       , doReact = \ size -> do
           logIO <- mkLogger "initReaction"
-          env <- get
-          guiContin <- logSubGtk logIO _ctxevt ("gtkRunHapplet "++show size) $
-            gtkRunHapplet happ $ init size
-          when (showWin && guiContin == GUIContinue) $ liftIO $ do
-            logIO _drawevt "Gtk.widgetShowAll"
-            Gtk.widgetShowAll (gtkWindow env)
-            logIO _drawevt "Gtk.widgetQueueDraw"
-            Gtk.widgetQueueDraw (gtkWindow env)
-          case guiContin of
-            GUIFail msg -> do
-              -- TODO: show a modal dialog box reporting the error.
-              liftIO $ hPutStrLn stderr msg
-            _           -> return ()
+          eventControl <- logSubGtk logIO _ctxevt ("liftGUIintoGtkState "++show size) $
+            liftGUIintoGtkState happ $ init size
+          case eventControl of
+            EventHandlerContinue () -> do
+              env <- get
+              when showWin $ liftIO $ do
+                logIO _drawevt "Gtk.widgetShowAll"
+                Gtk.widgetShowAll (gtkWindow env)
+                logIO _drawevt "Gtk.widgetQueueDraw"
+                Gtk.widgetQueueDraw (gtkWindow env)
+            EventHandlerHalt        -> liftIO $ hPutStrLn stderr $
+              "'deleteEventHandler' was called during Happlet initialization.\n" ++
+              "Happlet will not attach to window."
+            EventHandlerCancel      -> liftIO $ hPutStrLn stderr $
+              "'cancelNow' was called during Happlet initialization.\n"++
+              "Happlet will not attach to window."
+            EventHandlerFail   msg  -> liftIO $ hPutStrLn stderr $
+              "Happlet failed to initialize: "++show msg
+              -- TODO: also show a modal dialog box reporting the error.
       }
     win <- gets gtkWindow
     liftIO $ do
@@ -818,43 +851,58 @@ gtkAttachHapplet showWin win happ init = do
       Gtk.widgetShow win
 
 -- | Change the happlet displayed in the current window. Remove the current Happlet event handlers
--- and re-install the event handlers for the given Happlet.
-gtkSetHapplet :: Happlet newmodel -> (PixSize -> GtkGUI newmodel ()) -> GtkGUI oldmodel ()
+-- and re-install the event handlers for the given Happlet. Note that this function never returns.
+gtkSetHapplet :: Happlet newmodel -> (PixSize -> GtkGUI newmodel ()) -> GtkGUI oldmodel void
 gtkSetHapplet newHapp init = do
   logIO <- mkLogger "windowSetHapplet"
   oldHapp <- askHapplet
   if sameHapplet oldHapp newHapp
-   then liftIO $ logIO _ctxevt $
-          "-- the Happlet given is the one that is already attached to this window"
+   then do
+    liftIO $ logIO _ctxevt $
+      "-- the Happlet given is the one that is already attached to this window"
+    cancelNow
    else do
     liftIO $ logIO _ctxevt $ "putGUIState -- set context switcher"
-    modifyGUIState $ guiWindow %~ \ case
-      GtkUnlockedWin{} -> error "gtkSetHapplet evaluated on unlocked window"
-      GtkLockedWin env -> GtkLockedWin $ env & contextSwitcher .~ \ _guiCont env ->
-        logSubIO logIO _ctxevt "contextSwitcher" $ do
-          size <- Gtk.widgetGetDrawWindow (gtkWindow env) >>= Gtk.drawableGetSize
-          win  <- liftM fst $ onHapplet newHapp $ liftM (theGUIWindow &&& theGUIModel) .
-            logSubIO logIO _ctxevt "-- call happlet initializer" .
-            evalGUI (init $ sampCoord <$> uncurry V2 size) newHapp (GtkLockedWin env)
-          return $ case win of
-            GtkLockedWin env -> (GUIContinue, env)
-              -- When 'gtkSetHapplet' is called, it must be called from within a GUI event handler.
-              -- The GUI event handler is wrapped in a 'ConnectReact' data structure which is
-              -- programmed to automatically call 'forceDisconnect' on itself if 'GUIHalt' is
-              -- returned after evaluation of the GUI function completes within the 'runGtkState'
-              -- function. However this 'contextSwitcher' function is evaluated immediately
-              -- after. By default the 'contextSwitcher' will simply return the parameters passed to
-              -- it. But by returning 'GUIContinue' here, 'runGtkState' will return 'GUIContinue' to
-              -- the 'ConnectReact' calling context, and 'forceDisconnect' function is not
-              -- called. If this function were to return 'GUIHalt', it would trigger
-              -- 'forceDisconnect' in the calling context two levels above this one, which would
-              -- disconnect the event handlers that have just been installed by the evaluation of
-              -- the 'init' function above.
-            GtkUnlockedWin{} -> error
-              "'evalGUI' was given an unlocked window, but it returned a locked window."
-    runGtkStateGUI _ctxevt "gtkSetHapplet" $ disconnectAll logIO
+    env <- theGUIWindow <$> getGUIState >>= \ case
+      GtkUnlockedWin{} -> fail "gtkSetHapplet evaluated on unlocked window"
+      GtkLockedWin env -> return env
+    let detatch = env ^. detatchHandler
+     -- Must obtain 'detatchHandler' now, all handlers will be cleared soon.
+    modifyGUIState $ (guiWindow .~) $ GtkLockedWin $ env & contextSwitcher .~ do
+      logIO <- mkLogger "contextSwitcher"
+      liftIO $ logIO _ctxevt "-- has been set, now executing"
+      case detatch of
+        ConnectReact{doReact=f} -> logSubGtk logIO _ctxevt "detatchHandler" $ f ()
+        Disconnected -> liftIO $ logIO _ctxevt "-- detatchHandler not set"
+      (>>= put) $ liftIO $ logSubIO logIO _ctxevt "-- evaluate target happlet initializer" $ do
+        size <- Gtk.widgetGetDrawWindow (gtkWindow env) >>= Gtk.drawableGetSize
+        win  <- liftM fst $ onHapplet newHapp $ \ model ->
+          fmap (theGUIWindow &&& theGUIModel) $
+          logSubIO logIO _ctxevt "-- call happlet initializer" $
+          execGUI (init $ sampCoord <$> uncurry V2 size) GUIState
+            { theGUIWindow  = GtkLockedWin env
+            , theGUIHapplet = newHapp
+            , theGUIModel   = model
+            }
+        return $ case win of
+          GtkLockedWin env -> env
+            -- When 'gtkSetHapplet' is called, it must be called from within a GUI event handler.
+            -- The GUI event handler is wrapped in a 'ConnectReact' data structure which is
+            -- programmed to automatically call 'forceDisconnect' on itself if 'EventHandlerHalt'
+            -- is returned after evaluation of the GUI function completes within the 'runGtkState'
+            -- function. However this 'contextSwitcher' function is evaluated immediately
+            -- after. By default the 'contextSwitcher' will simply return the parameters passed to
+            -- it. But by returning 'GUIControl' here, 'runGtkState' will return 'GUIControl' to
+            -- the 'ConnectReact' calling context, and 'forceDisconnect' function is not
+            -- called. If this function were to return 'EventHandlerHalt', it would trigger
+            -- 'forceDisconnect' in the calling context two levels above this one, which would
+            -- disconnect the event handlers that have just been installed by the evaluation of
+            -- the 'init' function above.
+          GtkUnlockedWin{} -> error
+            "'evalGUI' was given an unlocked window, but it returned a locked window."
+    liftGtkStateIntoGUI _ctxevt "gtkSetHapplet" $ disconnectAll logIO
     liftIO $ logIO _ctxevt "disable"
-    disable
+    cancelNow -- not using 'deleteEventHandler' because 'disconnectAll' was already called.
 
 -- Set which function redraws the window.
 evalCairoOnCanvas :: CairoRender a -> GtkState a
@@ -924,7 +972,7 @@ exposeEventHandler logIO canvas region livest = do
 ----------------------------------------------------------------------------------------------------
 
 instance HappletWindow GtkWindow CairoRender where
-  getWindowSize       = runGtkStateGUI _drawevt "getWindowSize" $ do
+  getWindowSize        = liftGtkStateIntoGUI _drawevt "getWindowSize" $ do
     logIO <- mkLogger "getWindowSize"
     env <- get
     liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
@@ -932,11 +980,20 @@ instance HappletWindow GtkWindow CairoRender where
       (w, h) <- Gtk.drawableGetSize (gtkDrawWindow livest)
       return $ V2 (sampCoord w) (sampCoord h)
 
-  windowChangeHapplet = gtkSetHapplet
-  onCanvas            = runGtkStateGUI _drawevt "onCanvas"  . evalCairoOnCanvas
-  onOSBuffer          = runGtkStateGUI _drawevt "onOSBuffer". evalCairoOnGtkDrawable
+  windowChangeHapplet  = gtkSetHapplet
 
-  refreshRegion rects = runGtkStateGUI _drawevt "refreshRegion" $ do
+  changeEvents         = installEventHandler .
+    simpleSetup _ctxevt "changeEvents" detatchHandler . const
+
+  onCanvas             = liftGtkStateIntoGUI _drawevt "onCanvas"  . evalCairoOnCanvas
+
+  onOSBuffer           = liftGtkStateIntoGUI _drawevt "onOSBuffer". evalCairoOnGtkDrawable
+
+  pushWindowClipRegion = error "TODO: pushWindowClipRegion"
+
+  popWindowClipRegion  = error "TODO: popWindowClipRegion"
+
+  refreshRegion rects  = liftGtkStateIntoGUI _drawevt "refreshRegion" $ do
     logIO <- mkLogger "refreshRegion"
     env <- get
     liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $ \ livest ->
@@ -950,7 +1007,7 @@ instance HappletWindow GtkWindow CairoRender where
             Cairo.rectangle x y w h
             Cairo.fill
 
-  refreshWindow      = runGtkStateGUI _drawevt "refreshWindow" $ do
+  refreshWindow       = liftGtkStateIntoGUI _drawevt "refreshWindow" $ do
     logIO <- mkLogger "refreshWindow"
     env <- get
     liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
@@ -1146,7 +1203,7 @@ cairoClearCanvas r g b a = do
   Cairo.setOperator op
 
 --cairoSelectFont :: SelectFont -> GtkGUI model (Maybe FontExtents)
---cairoSelectFont font0 = runGtkStateGUI $ evalCairo $ do
+--cairoSelectFont font0 = liftGtkStateIntoGUI $ evalCairo $ do
 --  let loop (bold,italic,oblique,syms) = \ case
 --        []   -> (bold, italic, oblique, Strict.unwords $ syms [])
 --        a:ax -> let w = Strict.toLower a in ax & case w of
@@ -1177,33 +1234,47 @@ cairoClearCanvas r g b a = do
 
 instance Managed GtkWindow where
   windowVisible = gtkWindowVisible
-  visibleEvents =
-    installEventHandler _winevt "visibleEvents" visibilityReaction $ \ logIO sel env next -> do
-      let win = gtkWindow env
-      logIO (_winevt<>sel) "Glib.on Gtk.visibilityNotifyEvent"
-      vis <- Glib.on win Gtk.visibilityNotifyEvent $
-        Gtk.eventVisibilityState >>=
-        liftIO . next . not . (== Gtk.VisibilityFullyObscured) >>
-        return False
-      return $ do
-        logIO _winevt "Glib.signalDisconnect Gtk.visibilityNotifyEvent"
-        Glib.signalDisconnect vis
-  focusEvents   =
-    installEventHandler _winevt "focusEvents" focusReaction $ \ logIO sel env next -> do
-      let win = gtkWindow env
-      logIO (_winevt<>sel) "Glib.on Glib.focusInEvent"
-      focin  <- Glib.on win Gtk.focusInEvent  $ liftIO (next True)  >> return False
-      logIO (_winevt<>sel) "Glib.on Glib.focusOutEvent"
-      focout <- Glib.on win Gtk.focusOutEvent $ liftIO (next False) >> return False
-      return $ do
-        logIO (_winevt<>sel) "Glib.signalDisconnect (Glib.on Glib.focusInEvent)"
-        Glib.signalDisconnect focin
-        logIO (_winevt<>sel) "Glib.signalDisconnect (Glib.on Glib.focusOutEvent)"
-        Glib.signalDisconnect focout
+  visibleEvents react = installEventHandler EventSetup
+    { eventDebugTag     = _winevt
+    , eventDescription  = "visibleEvents"
+    , eventLensReaction = visibilityReaction
+    , eventPreInstall   = return ()
+    , eventInstall      = \ logIO sel env next -> do
+        let win = gtkWindow env
+        logIO (_winevt<>sel) "Glib.on Gtk.visibilityNotifyEvent"
+        vis <- Glib.on win Gtk.visibilityNotifyEvent $
+          Gtk.eventVisibilityState >>=
+          liftIO . next . not . (== Gtk.VisibilityFullyObscured) >>
+          return False
+        return $ do
+          logIO _winevt "Glib.signalDisconnect Gtk.visibilityNotifyEvent"
+          Glib.signalDisconnect vis
+    , eventGUIReaction  = react
+    }
+  focusEvents   react = installEventHandler EventSetup
+    { eventDebugTag     = _winevt
+    , eventDescription  = "focusEvents"
+    , eventLensReaction = focusReaction
+    , eventPreInstall   = return ()
+    , eventInstall      = \ logIO sel env next -> do
+        let win = gtkWindow env
+        logIO (_winevt<>sel) "Glib.on Glib.focusInEvent"
+        focin  <- Glib.on win Gtk.focusInEvent  $ liftIO (next True)  >> return False
+        logIO (_winevt<>sel) "Glib.on Glib.focusOutEvent"
+        focout <- Glib.on win Gtk.focusOutEvent $ liftIO (next False) >> return False
+        return $ do
+          logIO (_winevt<>sel) "Glib.signalDisconnect (Glib.on Glib.focusInEvent)"
+          Glib.signalDisconnect focin
+          logIO (_winevt<>sel) "Glib.signalDisconnect (Glib.on Glib.focusOutEvent)"
+          Glib.signalDisconnect focout
+    , eventGUIReaction  = react
+    }
 
 instance CanResize GtkWindow where
-  resizeEvents =
-    installEventHandler _winevt "resizeEvents" resizeReaction(\ _ _ _ _ -> return $ pure ())
+  resizeEvents mode react = installEventHandler
+    (simpleSetup _winevt "resizeEvents" resizeReaction $ uncurry react)
+    { eventPreInstall = cairoRenderState . canvasResizeMode .= mode
+    }
 
 data AnimationThreadControl
   = AnimationThreadControl
@@ -1212,56 +1283,72 @@ data AnimationThreadControl
     }
 
 instance CanAnimate GtkWindow where
-  animationIsRunning = runGtkStateGUI _animevt "animationIsRunning" $
+  animationIsRunning = liftGtkStateIntoGUI _animevt "animationIsRunning" $
     gets theAnimatorThread <&> \ case { Disconnected -> False; _ -> True; }
-  stepFrameEvents react = do
-    flip (installEventHandler _animevt "stepFrameEvents" animatorThread) react $
-      \ logIO sel env next -> do
-          let rate = env & theAnimationFrameRate . currentConfig
-          t0    <- getCurrentTime
-          t0ref <- newIORef AnimationThreadControl
-            { animationThreadAlive = True
-            , animationInitTime    = t0
-            }
-          logIO (_animevt<>sel) "Glib.on timeout"
-          frame <- flip Glib.timeoutAdd (min 200 $ floor (1000.0 / rate)) $ do
-            (AnimationThreadControl
-              {animationThreadAlive=alive
-              ,animationInitTime=t0
-              }) <- readIORef t0ref
-            when alive $ diffUTCTime <$> getCurrentTime <*> pure t0 >>= next . realToFrac
-            animationThreadAlive <$> readIORef t0ref
-          --
-          -- TODO: the 'next' function needs to be evaluated here at time 0, becuase 'timeoutAdd'
-          -- does not call it until after the first time step interval has passed. For slow
-          -- animations, this will cause a noticable delay between the time the 'stepFrameEvents'
-          -- function is evaluated and the first frame callback is evaluated.
-          return $ do
-            logIO (_animevt<>sel) "Glib.signalDisconnect (Glib.on timeout)"
-            modifyIORef t0ref $ \ ctrl -> ctrl{ animationThreadAlive = False }
-            Glib.timeoutRemove frame
+  stepFrameEvents react = installEventHandler EventSetup
+    { eventDebugTag     = _animevt
+    , eventDescription  = "stepFrameEvents"
+    , eventLensReaction = animatorThread
+    , eventPreInstall   = return ()
+    , eventInstall      = \ logIO sel env next -> do
+        let rate = env & theAnimationFrameRate . currentConfig
+        t0    <- getCurrentTime
+        t0ref <- newIORef AnimationThreadControl
+          { animationThreadAlive = True
+          , animationInitTime    = t0
+          }
+        logIO (_animevt<>sel) "Glib.on timeout"
+        frame <- flip Glib.timeoutAdd (min 200 $ floor (1000.0 / rate)) $ do
+          (AnimationThreadControl
+            {animationThreadAlive=alive
+            ,animationInitTime=t0
+            }) <- readIORef t0ref
+          when alive $ diffUTCTime <$> getCurrentTime <*> pure t0 >>= next . realToFrac
+          animationThreadAlive <$> readIORef t0ref
+        --
+        -- TODO: the 'next' function needs to be evaluated here at time 0, becuase 'timeoutAdd'
+        -- does not call it until after the first time step interval has passed. For slow
+        -- animations, this will cause a noticable delay between the time the 'stepFrameEvents'
+        -- function is evaluated and the first frame callback is evaluated.
+        return $ do
+          logIO (_animevt<>sel) "Glib.signalDisconnect (Glib.on timeout)"
+          modifyIORef t0ref $ \ ctrl -> ctrl{ animationThreadAlive = False }
+          Glib.timeoutRemove frame
+    , eventGUIReaction  = react
+    }
 
 instance CanKeyboard GtkWindow where
-  keyboardEvents = installEventHandler _keyevt "keyboardEvents" keyHandler $ \ logIO sel env next -> do
-    -- Event boxes do not capture key events for some reason. Key handlers must be installed into
-    -- the window widget itself.
-    let box = gtkWindow env
-    logIO (_keyevt<>sel) "Glib.on Gtk.keyReleaseEvent"
-    press   <- Glib.on box Gtk.keyReleaseEvent $
-      handleKey False >>= liftIO . next >> return False
-    logIO (_keyevt<>sel) "Glib.on Gtk.keyPressEvent"
-    release <- Glib.on box Gtk.keyPressEvent $
-      handleKey True  >>= liftIO . next >> return False
-    return $ do
-      logIO (_keyevt<>sel) "Glib.signalDisconnect [Gtk.keyPressEvent, Gtk.keyReleaseEvent]"
-      Glib.signalDisconnect press
-      Glib.signalDisconnect release
+  keyboardEvents react = installEventHandler EventSetup
+    { eventDebugTag     = _keyevt
+    , eventDescription  = "keyboardEvents"
+    , eventLensReaction = keyHandler
+    , eventPreInstall   = return ()
+    , eventInstall      = \ logIO sel env next -> do
+      -- Event boxes do not capture key events for some reason. Key handlers must be installed into
+      -- the window widget itself.
+      let box = gtkWindow env
+      logIO (_keyevt<>sel) "Glib.on Gtk.keyReleaseEvent"
+      press   <- Glib.on box Gtk.keyReleaseEvent $
+        handleKey False >>= liftIO . next >> return False
+      logIO (_keyevt<>sel) "Glib.on Gtk.keyPressEvent"
+      release <- Glib.on box Gtk.keyPressEvent $
+        handleKey True  >>= liftIO . next >> return False
+      return $ do
+        logIO (_keyevt<>sel) "Glib.signalDisconnect [Gtk.keyPressEvent, Gtk.keyReleaseEvent]"
+        Glib.signalDisconnect press
+        Glib.signalDisconnect release
+    , eventGUIReaction  = react
+    }
 
 instance CanMouse GtkWindow where
   providedMouseDevices = return []
-  mouseEvents = \ case
-    MouseButton -> installEventHandler _mousevt "mouseEvents MouseButton" mouseHandler $
-      \ logIO sel env next -> do
+  mouseEvents          = \ case
+    MouseButton -> \ react -> installEventHandler EventSetup
+      { eventDebugTag     = _mousevt
+      , eventDescription  = "mouseEvents MouseButton"
+      , eventLensReaction = mouseHandler
+      , eventPreInstall   = return ()
+      , eventInstall      = \ logIO sel env next -> do
           let box = env ^. gtkEventBox
           logIO (_mousevt<>sel) $ "Glib.on Gtk.buttonPressEvent"
           press <- Glib.on box Gtk.buttonPressEvent $
@@ -1272,8 +1359,14 @@ instance CanMouse GtkWindow where
             logIO (_mousevt<>sel) $ "Glib.signalDisconnect Gtk.buttonPressEvent"
             Glib.signalDisconnect press
             Glib.signalDisconnect release
-    MouseDrag   -> installEventHandler _mousevt "mouseEvents MouseDrag" mouseHandler $
-      \ logIO sel env next -> do
+      , eventGUIReaction  = react
+      }
+    MouseDrag   -> \ react -> installEventHandler EventSetup
+      { eventDebugTag     = _mousevt
+      , eventDescription  = "mouseEvents MouseDrag"
+      , eventLensReaction = mouseHandler
+      , eventPreInstall   = return ()
+      , eventInstall      = \ logIO sel env next -> do
           let box = env ^. gtkEventBox
           logIO (_mousevt<>sel) $ "Glib.on Gtk.buttonPressEvent"
           press <- Glib.on box Gtk.buttonPressEvent $
@@ -1301,8 +1394,14 @@ instance CanMouse GtkWindow where
             Gtk.widgetDelEvents box [Gtk.ButtonMotionMask]
             logIO (_mousevt<>sel) "Gtk.containerAdd window eventBox"
             Gtk.containerAdd (gtkWindow env) box
-    MouseAll    -> installEventHandler _mousevt "mouseEvents MouseAll" mouseHandler $
-      \ logIO sel env next -> do
+      , eventGUIReaction  = react
+      }
+    MouseAll    -> \ react -> installEventHandler EventSetup
+      { eventDebugTag     = _mousevt
+      , eventDescription  = "mouseEvents MouseAll"
+      , eventLensReaction = mouseHandler
+      , eventPreInstall   = return ()
+      , eventInstall      = \ logIO sel env next -> do
           let box = env ^. gtkEventBox
           button  <- newIORef False
           logIO (_mousevt<>sel) $ "Glib.on Gtk.buttonPressEvents"
@@ -1336,40 +1435,89 @@ instance CanMouse GtkWindow where
             Gtk.widgetDelEvents box [Gtk.PointerMotionMask, Gtk.ButtonMotionMask]
             logIO (_mousevt<>sel) $ "Gtk.containerAdd window eventBox"
             Gtk.containerAdd (gtkWindow env) box
+      , eventGUIReaction  = react
+      }
+
+----------------------------------------------------------------------------------------------------
+
+-- | When installing a Glib event handler, the sequence of evaluation for locking resources,
+-- obtaining parameters from the 'GtkState', evaluating monads using these resources, is a delicate
+-- process that is very easy to get wrong. So I have created an abstraction for the sequence of
+-- actions that occurs during event handler installation. Event handler installers set the fields
+-- of this data structure and pass it to 'intallEventHandler'.
+--
+-- The 'simpleSetup' constructor is also provided, which is used by event handlers that do not need
+-- to install and remove the callbacks because they are always installed, for example the resize
+-- window handler. The 'simpleSetup' takes only the debug parameters, the 'eventLensReaction', and the
+-- 'eventGUIReaction', and it simply updates the 'eventLensReaction' to trigger the given
+-- 'eventGUIReaction'.
+data EventSetup event model
+  = EventSetup
+    { eventDebugTag     :: DebugTag
+      -- ^ Which tags to set in the debug system.
+    , eventDescription  :: String
+      -- ^ A human-readble description of which event handler installer this is, to be reported in
+      -- debug logs.
+    , eventLensReaction :: Lens' GtkWindowState (ConnectReact event)
+      -- ^ A lens that can get and set one of the 'ConnectReact' functions in the Gtk window state.
+    , eventPreInstall   :: GtkState ()
+      -- ^ An action to perform prior installing the Gtk event handler callback.
+    , eventInstall      :: Log IO -> DebugTag -> GtkWindowState -> (event -> IO ()) -> IO (IO ())
+      -- ^ Install the Gtk event handler callback which triggers event reactions.
+    , eventGUIReaction  :: event -> GtkGUI model ()
+      -- ^ The GUI function provided by the end users (programmers) of this library that reacts to
+      -- the event with a state update.
+    }
+
+-- | An 'EventSetup' that does nothing more than install a 'ConnectReact' function.
+simpleSetup
+  :: DebugTag
+  -> String
+  -> Lens' GtkWindowState (ConnectReact event)
+  -> (event -> GtkGUI model ())
+  -> EventSetup event model
+simpleSetup sel what connectReact react = EventSetup
+  { eventDebugTag     = sel
+  , eventDescription  = what
+  , eventLensReaction = connectReact
+  , eventPreInstall   = return ()
+  , eventInstall      = \ _ _ _ _ -> return $ pure ()
+  , eventGUIReaction    = react
+  }
 
 -- | This function enables an event handler, and takes a continuation which will be evaluated by
 -- this function call to do the low-level work of install the event handler into the Gtk
-  -- window. This function also does the work of taking a 'Happlets.GUI.GUI' function to be evaluated
+-- window. This function also does the work of taking a 'Happlets.GUI.GUI' function to be evaluated
 -- on each event, converting this function to a 'ConnectReact' function, and installing it into the
 -- 'GtkWindow's internal state so that it can be actually evaluated every time the low-level event
 -- handler is evaluated. The result is a function that can be used to instantiate any of the
 -- "Happlets.GUI" module's event handler classes.
-installEventHandler
-  :: Show event
-  => DebugTag
-  -> String
-  -> Lens' GtkWindowState (ConnectReact event)
-  -> (Log IO -> DebugTag -> GtkWindowState -> (event -> IO ()) -> IO (IO ()))
-  -> (event -> GtkGUI model ())
-  -> GtkGUI model ()
-installEventHandler sel what connectReact install react = do
+installEventHandler :: Show event => EventSetup event model -> GtkGUI model ()
+installEventHandler setup = do
+  let sel        = eventDebugTag     setup
+  let what       = eventDescription  setup
+  let preinstall = eventPreInstall   setup
+  let install    = eventInstall      setup
+  let react      = eventGUIReaction  setup
   logIO <- mkLogger what
   happ  <- askHapplet
   let dbgmsg = "installEventHandler "++what
-  runGtkStateGUI sel dbgmsg $ do
+  liftGtkStateIntoGUI sel dbgmsg $ do
     env <- get
-    forceDisconnect logIO sel what connectReact
+    forceDisconnect logIO sel what (eventLensReaction setup)
+    liftIO $ logIO sel $ "-- preinstall "++what++" event handler"
+    preinstall
     disconnect <- liftIO $ do
       logIO sel $ "-- install "++what++"event handler"
       install logIO sel env $ \ event -> do
         lockGtkWindow logIO sel (GtkUnlockedWin $ thisWindow env) $
-          evalConnectReact logIO sel what connectReact event
+          evalConnectReact logIO sel what (eventLensReaction setup) event
     liftIO $ logIO sel $ what ++ " -- now enabled"
-    connectReact .= ConnectReact
-      { doReact = logSubGtk logIO sel ("gtkRunHapplet "++what) .
-          gtkRunHapplet happ . react >=> \ guiCont ->
+    (eventLensReaction setup) .= ConnectReact
+      { doReact = logSubGtk logIO sel ("liftGUIintoGtkState "++what) .
+          liftGUIintoGtkState happ . react >=> \ guiCont ->
             logSubGtk logIO sel (unwords ["checkGUIContinue", what, show guiCont]) $
-              checkGUIContinue logIO sel what connectReact guiCont
+              checkGUIContinue logIO sel what (eventLensReaction setup) guiCont
       , doDisconnect = liftIO (logIO sel $ "disconnect "++what) >> disconnect
       }
 
@@ -1577,7 +1725,7 @@ data GtkImage
 
 instance CanBufferImages GtkWindow GtkImage CairoRender where
 #if USE_CAIRO_SURFACE_BUFFER
-  newImageBuffer size@(V2 w h) draw = runGtkStateGUI _drawevt "newImageBuffer" $ do
+  newImageBuffer size@(V2 w h) draw = liftGtkStateIntoGUI _drawevt "newImageBuffer" $ do
     rendst <- use cairoRenderState
     (a, rendst, img) <- liftIO $ do
       logIO <- mkLogger "newImageBuffer"
@@ -1591,7 +1739,7 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
     return (a, img)
 
   resizeImageBuffer (GtkImage{gtkCairoSurfaceMVar=mvar}) size@(V2 w h) draw =
-    runGtkStateGUI _drawevt ("resizeImageBuffer ("++show size++")") $ do
+    liftGtkStateIntoGUI _drawevt ("resizeImageBuffer ("++show size++")") $ do
       rendst <- use cairoRenderState
       (a, rendst) <- liftIO $ do
         logIO <- mkLogger "resizeImageBuffer"
@@ -1610,7 +1758,7 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
       cairoRenderState .= rendst
       return a
 
-  drawImage (GtkImage{gtkCairoSurfaceMVar=mvar}) draw = runGtkStateGUI _drawevt "drawImage" $ do
+  drawImage (GtkImage{gtkCairoSurfaceMVar=mvar}) draw = liftGtkStateIntoGUI _drawevt "drawImage" $ do
     rendst <- use cairoRenderState
     (a, rendst) <- liftIO $ do
       logIO <- mkLogger "drawImage"
@@ -1623,7 +1771,7 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
     cairoRenderState .= rendst
     return a
 
-  blitImage (GtkImage{gtkCairoSurfaceMVar=mvar}) offset = runGtkStateGUI _drawevt "blitImage" $ do
+  blitImage (GtkImage{gtkCairoSurfaceMVar=mvar}) offset = liftGtkStateIntoGUI _drawevt "blitImage" $ do
     logIO <- mkLogger "blitImage"
     liveMVar <- gets gtkWindowLive
     liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" liveMVar $ \ liveEnv ->
@@ -1639,7 +1787,7 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
               Cairo.paint
 
   blitImageTo (GtkImage{gtkCairoSurfaceMVar=src}) (GtkImage{gtkCairoSurfaceMVar=targ}) offset =
-    runGtkStateGUI _drawevt "blitImageTo" $ liftIO $
+    liftGtkStateIntoGUI _drawevt "blitImageTo" $ liftIO $
       if src == targ then error "cannot blit image to itself" else do
         logIO <- mkLogger "blitImageTo"
         logWithMVar logIO _drawevt "blitSource" src $ \ src ->
@@ -1680,7 +1828,7 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
       logIO _drawevt "Gtk.renderWithDrawable drawImage" .
       flip Gtk.renderWithDrawable (runCairoRender draw)
 
-  blitImage (GtkImage{gtkPixmapMVar=mvar}) offset = runGtkStateGUI $ do
+  blitImage (GtkImage{gtkPixmapMVar=mvar}) offset = liftGtkStateIntoGUI $ do
     logIO <- mkLogger "blitImage"
     gtkwin <- gets gtkWindow
     canvas <- liftIO $ Gtk.widgetGetDrawWindow gtkwin

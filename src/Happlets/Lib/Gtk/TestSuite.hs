@@ -2,8 +2,6 @@ module Happlets.Lib.Gtk.TestSuite where
 
 import           Happlets.Lib.Gtk
 
-import           Linear.V2
-
 import qualified Graphics.Rendering.Cairo as Cairo
 
 ----------------------------------------------------------------------------------------------------
@@ -75,7 +73,7 @@ redGridDraw scale winsize = do
 redGridGUI :: TestSuite -> PixSize -> GtkGUI RedGrid ()
 redGridGUI ctx _size = do
   let draw size = use redGridScale >>= onCanvas . flip redGridDraw size
-  resizeEvents $ \ size -> cancelIfBusy >> draw size
+  resizeEvents ClearCanvasMode $ \ _oldsize newsize -> cancelIfBusy >> draw newsize
   mouseEvents MouseAll $ \ mouse@(Mouse _ down _ button pt1@(V2 x y)) -> do
     when down $ case button of
       RightClick -> switchToPulseCircle ctx
@@ -179,7 +177,7 @@ pulseCircleGUI ctx initSize@(V2 (SampCoord w) (SampCoord h)) = do
 
   -- On resize, simply redraw the window without modifying the model. We don't need to use the new
   -- size information for the window.
-  resizeEvents $ \ newSize@(V2 newW newH) -> do
+  resizeEvents ClearCanvasMode $ \ _oldsize newSize@(V2 newW newH) -> do
     old <- get
     let (V2 oldW oldH) = old ^. pulseCircleWindowSize
     let (V2 x    y   ) = old ^. pulseCirclePosition
