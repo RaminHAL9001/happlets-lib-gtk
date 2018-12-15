@@ -464,7 +464,7 @@ liftGUIintoGtkState happlet f = do
   -- (1) Always set 'contextSwitcher' to a no-op, it may be set to something else by @f@.
   contextSwitcher .= return ()
   winst <- get
-  (result, _) <- liftIO $
+  ((result, gtkst), _) <- liftIO $
     logSubIO logIO _locks "Lock Happlet, evaluate GUI function." $ 
       onHapplet happlet $ \ model -> do
         (guiContin, guist) <- logSubIO logIO _infra "call runGUI" $
@@ -477,10 +477,10 @@ liftGUIintoGtkState happlet f = do
           GtkLockedWin winst -> return ((guiContin, winst), theGUIModel guist)
           GtkUnlockedWin{}   -> fail $
             "'runGUI' successfully completed, but returned state containing a locked window."
-  -- (2) If it was not changed by @f@ between (1) and (2), it is still a no-op.
-  liftIO $ logIO _ctxevt $ "Check if 'contextSwitcher' was set."
-  join $ use contextSwitcher
-  state $ const result
+  put gtkst -- Save the GtkState state produced by evaluation of the GtkGUI function.
+  -- (2) If the context switcher was not changed by @f@ between (1) and (2), it is still a no-op.
+  gtkst ^. contextSwitcher
+  return result
 
 -- | This function is intended to be passed as a parameter to 'liftGUIintoGtkState' by event handling
 -- functions which check if the 'Happlets.GUI.GUI' function evaluated to 'Happlets.GUI.disable'.
@@ -852,9 +852,9 @@ gtkAttachHapplet showWin win happ init = do
 
 -- | Change the happlet displayed in the current window. Remove the current Happlet event handlers
 -- and re-install the event handlers for the given Happlet. Note that this function never returns.
-gtkSetHapplet :: Happlet newmodel -> (PixSize -> GtkGUI newmodel ()) -> GtkGUI oldmodel void
+gtkSetHapplet :: Happlet newmodel -> (PixSize -> GtkGUI newmodel ()) -> GtkGUI oldmodel ()
 gtkSetHapplet newHapp init = do
-  logIO <- mkLogger "windowSetHapplet"
+  logIO <- mkLogger "gtkSetHapplet"
   oldHapp <- askHapplet
   if sameHapplet oldHapp newHapp
    then do
@@ -901,7 +901,7 @@ gtkSetHapplet newHapp init = do
           GtkUnlockedWin{} -> error
             "'evalGUI' was given an unlocked window, but it returned a locked window."
     liftGtkStateIntoGUI _ctxevt "gtkSetHapplet" $ disconnectAll logIO
-    liftIO $ logIO _ctxevt "disable"
+    liftIO $ logIO _ctxevt "cancelNow"
     cancelNow -- not using 'deleteEventHandler' because 'disconnectAll' was already called.
 
 -- Set which function redraws the window.
