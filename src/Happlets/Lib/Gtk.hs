@@ -212,12 +212,15 @@ data CairoRenderMode
 
 data CairoRenderState
   = CairoRenderState
-    { cairoKeepWinSize           :: !PixSize
+    { theCairoKeepWinSize        :: !PixSize
     --  , theMinFontExtents          :: !(Maybe Cairo.FontExtents)
     , theCanvasResizeMode        :: !CanvasMode
     , theCairoRenderMode         :: !CairoRenderMode
     , theCairoScreenPrinterState :: !ScreenPrinterState
     }
+
+cairoKeepWinSize :: Lens' CairoRenderState PixSize
+cairoKeepWinSize = lens theCairoKeepWinSize $ \ a b -> a{ theCairoKeepWinSize = b }
 
 --minFontExtents :: Lens' CairoRenderState (Maybe Cairo.FontExtents)
 --minFontExtents = lens theMinFontExtents $ \ a b -> a{ theMinFontExtents = b }
@@ -241,7 +244,7 @@ cairoRender = CairoRender . lift
 runCairoRender
   :: PixSize -> CairoRenderState -> CairoRender a -> Cairo.Render (a, CairoRenderState)
 runCairoRender winsize rendst (CairoRender f) =
-  runStateT (lift (cairoSetFontStyle defaultFontStyle) >> f) (rendst{ cairoKeepWinSize = winsize })
+  runStateT (lift (cairoSetFontStyle defaultFontStyle) >> f) (rendst & cairoKeepWinSize .~ winsize)
 
 -- | Switch to vector mode (only if it isn't already) which marks the surface as "dirty" in the
 -- smallest possible rectangle containing all points. This function is called before every vector
@@ -319,7 +322,6 @@ data GtkWindowState
     , gtkWindowLive           :: !(MVar GtkWindowLive)
     , gtkWindow               :: !Gtk.Window
     , theGtkEventBox          :: !Gtk.EventBox
-    , theGtkCurrentWindowSize :: !PixSize
     , theCairoRenderState     :: !CairoRenderState
     , theInitReaction         :: !(ConnectReact PixSize)
     , theResizeReaction       :: !(ConnectReact (OldPixSize, NewPixSize))
@@ -369,7 +371,7 @@ cairoRenderState :: Lens' GtkWindowState CairoRenderState
 cairoRenderState = lens theCairoRenderState $ \ a b -> a{ theCairoRenderState = b }
 
 gtkCurrentWindowSize :: Lens' GtkWindowState PixSize
-gtkCurrentWindowSize = lens theGtkCurrentWindowSize $ \ a b -> a{ theGtkCurrentWindowSize = b }
+gtkCurrentWindowSize = cairoRenderState . cairoKeepWinSize
 
 initReaction :: Lens' GtkWindowState (ConnectReact PixSize)
 initReaction = lens theInitReaction $ \ a b -> a{ theInitReaction = b }
@@ -548,10 +550,9 @@ createWin cfg = do
         , thisWindow               = this
         , gtkWindowLive            = live
         , gtkWindow                = window
-        , theGtkCurrentWindowSize  = V2 0 0
         , theGtkEventBox           = eventBox
         , theCairoRenderState      = CairoRenderState
-            { cairoKeepWinSize           = V2 0 0
+            { theCairoKeepWinSize        = V2 0 0
             , theCanvasResizeMode        = ClearCanvasMode
             , theCairoRenderMode         = VectorMode
             , theCairoScreenPrinterState = screenPrinterState
@@ -852,8 +853,14 @@ gtkAttachHapplet showWin win happ init = do
 
 -- | Change the happlet displayed in the current window. Remove the current Happlet event handlers
 -- and re-install the event handlers for the given Happlet. Note that this function never returns.
-gtkSetHapplet :: Happlet newmodel -> (PixSize -> GtkGUI newmodel ()) -> GtkGUI oldmodel ()
+gtkSetHapplet :: Happlet newmodel -> (PixSize -> GtkGUI newmodel ()) -> GtkGUI oldmodel void
 gtkSetHapplet newHapp init = do
+  -- This function solves the problem of evaluating a 'GtkGUI' function of one type (newmodel)
+  -- within a 'GtkGUI' function of another type (oldmodel). It achieves this by converting
+  -- evaluation of the @init@ function to a function of type 'GtkState' and storing this function
+  -- into the 'contextSwitcher' field of the 'GtkWindowState'. The 'liftGUIintoGtkState' function
+  -- (which would evaluated the 'GUI' function that evaluated this 'gtkSetHapplet' function), will
+  -- then retrieve the content in 'contextSwitcher' that was set here in this function.
   logIO <- mkLogger "gtkSetHapplet"
   oldHapp <- askHapplet
   if sameHapplet oldHapp newHapp
@@ -869,11 +876,20 @@ gtkSetHapplet newHapp init = do
     let detatch = env ^. detatchHandler
      -- Must obtain 'detatchHandler' now, all handlers will be cleared soon.
     modifyGUIState $ (guiWindow .~) $ GtkLockedWin $ env & contextSwitcher .~ do
+      -- (1) This is the code that evaluates the initializer for the new happlet. It is not
+      -- evaluated here. Here we simply save this action into the 'contextSwitcher' field of the
+      -- 'GtkWindowState'. Refer to the 'liftGUIintoGtkState' function, you will see that every time
+      -- a 'GtkGUI' function is evaluated, the 'contextSwitcher' is set to @return ()@, then the GUI
+      -- function is evaluated, then the content of 'contextSwitcher' is retrieved and evaluated. If
+      -- this block of code has been placed into the 'contextSwitcher' field of the
+      -- 'GtkWindowState', it is evaluated just before the 'liftGUIintoGtkState' function completes
+      -- evaluating and concludes the event handler thread. Read section (2) of the comments below
+      -- to see what happens after the 'contextSwitcher' field is set.
       logIO <- mkLogger "contextSwitcher"
       liftIO $ logIO _ctxevt "-- has been set, now executing"
       case detatch of
         ConnectReact{doReact=f} -> logSubGtk logIO _ctxevt "detatchHandler" $ f ()
-        Disconnected -> liftIO $ logIO _ctxevt "-- detatchHandler not set"
+        Disconnected            -> liftIO $ logIO _ctxevt "-- detatchHandler not set"
       (>>= put) $ liftIO $ logSubIO logIO _ctxevt "-- evaluate target happlet initializer" $ do
         size <- Gtk.widgetGetDrawWindow (gtkWindow env) >>= Gtk.drawableGetSize
         win  <- liftM fst $ onHapplet newHapp $ \ model ->
@@ -886,20 +902,17 @@ gtkSetHapplet newHapp init = do
             }
         return $ case win of
           GtkLockedWin env -> env
-            -- When 'gtkSetHapplet' is called, it must be called from within a GUI event handler.
-            -- The GUI event handler is wrapped in a 'ConnectReact' data structure which is
-            -- programmed to automatically call 'forceDisconnect' on itself if 'EventHandlerHalt'
-            -- is returned after evaluation of the GUI function completes within the 'runGtkState'
-            -- function. However this 'contextSwitcher' function is evaluated immediately
-            -- after. By default the 'contextSwitcher' will simply return the parameters passed to
-            -- it. But by returning 'GUIControl' here, 'runGtkState' will return 'GUIControl' to
-            -- the 'ConnectReact' calling context, and 'forceDisconnect' function is not
-            -- called. If this function were to return 'EventHandlerHalt', it would trigger
-            -- 'forceDisconnect' in the calling context two levels above this one, which would
-            -- disconnect the event handlers that have just been installed by the evaluation of
-            -- the 'init' function above.
           GtkUnlockedWin{} -> error
             "'evalGUI' was given an unlocked window, but it returned a locked window."
+    -- (2) After setting the 'contextSwitcher' field, the current 'Happlet's event handlers are all
+    -- deleted. Then 'cancelNow' is called, immediately halting evaluation of this function. This
+    -- ensures that control the 'GUI' function context which called this 'gtkSetHapplet' function
+    -- will be halted immediately and control will return to the 'liftGUIintoGtkState' function
+    -- which called this function. It also ensure no evaluation occurs after 'gtkSetHapplet' is
+    -- evaluated, which I think is a very intuitive operation semantics for this function. When
+    -- evaluation returns to 'liftGUIintoGtkState' the last thing that 'liftGUIintoGtkState' does is
+    -- evaluate the content of 'contextSwitcher' which was set just now in section (1) of the
+    -- comments.
     liftGtkStateIntoGUI _ctxevt "gtkSetHapplet" $ disconnectAll logIO
     liftIO $ logIO _ctxevt "cancelNow"
     cancelNow -- not using 'deleteEventHandler' because 'disconnectAll' was already called.
@@ -972,7 +985,7 @@ exposeEventHandler logIO canvas region livest = do
 ----------------------------------------------------------------------------------------------------
 
 instance HappletWindow GtkWindow CairoRender where
-  getWindowSize        = liftGtkStateIntoGUI _drawevt "getWindowSize" $ do
+  getWindowSize             = liftGtkStateIntoGUI _drawevt "getWindowSize" $ do
     logIO <- mkLogger "getWindowSize"
     env <- get
     liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
@@ -980,20 +993,30 @@ instance HappletWindow GtkWindow CairoRender where
       (w, h) <- Gtk.drawableGetSize (gtkDrawWindow livest)
       return $ V2 (sampCoord w) (sampCoord h)
 
-  windowChangeHapplet  = gtkSetHapplet
+  windowChangeHapplet       = gtkSetHapplet
 
-  changeEvents         = installEventHandler .
+  changeEvents              = installEventHandler .
     simpleSetup _ctxevt "changeEvents" detatchHandler . const
 
-  onCanvas             = liftGtkStateIntoGUI _drawevt "onCanvas"  . evalCairoOnCanvas
+  onCanvas                  =
+    liftGtkStateIntoGUI _drawevt "onCanvas"  . evalCairoOnCanvas
 
-  onOSBuffer           = liftGtkStateIntoGUI _drawevt "onOSBuffer". evalCairoOnGtkDrawable
+  onOSBuffer                =
+    liftGtkStateIntoGUI _drawevt "onOSBuffer". evalCairoOnGtkDrawable
 
-  pushWindowClipRegion = error "TODO: pushWindowClipRegion"
+  pushWindowClipRegion rect = onCanvas $ cairoRender $ do
+    Cairo.save
+    let head = rect ^. rect2DHead
+    let tail = rect ^. rect2DTail
+    let (x, y) = head ^. pointXY
+    let (w, h) = (tail - head) ^. pointXY
+    let f (SampCoord x) = realToFrac x
+    Cairo.rectangle (f x) (f y) (f w) (f h)
+    Cairo.clip
 
-  popWindowClipRegion  = error "TODO: popWindowClipRegion"
+  popWindowClipRegion       = onCanvas $ cairoRender $ Cairo.restore
 
-  refreshRegion rects  = liftGtkStateIntoGUI _drawevt "refreshRegion" $ do
+  refreshRegion rects       = liftGtkStateIntoGUI _drawevt "refreshRegion" $ do
     logIO <- mkLogger "refreshRegion"
     env <- get
     liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $ \ livest ->
@@ -1007,7 +1030,7 @@ instance HappletWindow GtkWindow CairoRender where
             Cairo.rectangle x y w h
             Cairo.fill
 
-  refreshWindow       = liftGtkStateIntoGUI _drawevt "refreshWindow" $ do
+  refreshWindow            = liftGtkStateIntoGUI _drawevt "refreshWindow" $ do
     logIO <- mkLogger "refreshWindow"
     env <- get
     liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
@@ -1037,7 +1060,7 @@ instance RenderText CairoRender where
     
   getWindowGridCellSize = do
     size <- getGridCellSize
-    (V2 w h) <- CairoRender $ gets cairoKeepWinSize
+    (V2 w h) <- CairoRender $ use cairoKeepWinSize
     return $ V2 (realToFrac w / size) (realToFrac h / size)
     
   screenPrintCharNoAdvance st c = unless (not (isPrint c) || wcwidth c <= 0) $ do
@@ -1305,11 +1328,11 @@ instance CanAnimate GtkWindow where
             }) <- readIORef t0ref
           when alive $ diffUTCTime <$> getCurrentTime <*> pure t0 >>= next . realToFrac
           animationThreadAlive <$> readIORef t0ref
-        --
-        -- TODO: the 'next' function needs to be evaluated here at time 0, becuase 'timeoutAdd'
+        -- The 'next' function needs to be evaluated here at time 0, becuase 'timeoutAdd'
         -- does not call it until after the first time step interval has passed. For slow
         -- animations, this will cause a noticable delay between the time the 'stepFrameEvents'
         -- function is evaluated and the first frame callback is evaluated.
+        liftIO $ logSubIO logIO _animevt "stepFrameEvents: handler init @t=0" (next 0)
         return $ do
           logIO (_animevt<>sel) "Glib.signalDisconnect (Glib.on timeout)"
           modifyIORef t0ref $ \ ctrl -> ctrl{ animationThreadAlive = False }

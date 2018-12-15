@@ -2,6 +2,11 @@ module Happlets.Lib.Gtk.TestSuite where
 
 import           Happlets.Lib.Gtk
 
+import           Control.Concurrent.MVar
+
+import           Data.Semigroup
+import qualified Data.Text as Strict
+
 import qualified Graphics.Rendering.Cairo as Cairo
 
 ----------------------------------------------------------------------------------------------------
@@ -10,8 +15,9 @@ import qualified Graphics.Rendering.Cairo as Cairo
 -- to the test suite window.
 data TestSuite
   = TestSuite
-    { switchToPulseCircle :: GtkGUI RedGrid ()
-    , switchToRedGrid     :: GtkGUI PulseCircle ()
+    { testSuiteSharedState :: MVar Strict.Text
+    , switchToPulseCircle  :: GtkGUI RedGrid ()
+    , switchToRedGrid      :: GtkGUI PulseCircle ()
     }
 
 main :: IO ()
@@ -20,7 +26,8 @@ main = happlet gtkHapplet $ do
   windowTitleBar      .= "Happlets Test"
   recommendWindowSize .= (640, 480)
   quitOnWindowClose   .= True
-  
+
+  mvar        <- liftIO $ newMVar "Main"
   win         <- newWindow
   pulsecircle <- newHapplet PulseCircle
     { thePulseCircleRadius     = 20
@@ -32,8 +39,9 @@ main = happlet gtkHapplet $ do
   redgrid     <- newHapplet (RedGrid 64.0 Nothing)
 
   let testSuite = TestSuite
-        { switchToPulseCircle = windowChangeHapplet pulsecircle $ pulseCircleGUI testSuite
-        , switchToRedGrid     = windowChangeHapplet redgrid     $ redGridGUI     testSuite
+        { testSuiteSharedState = mvar
+        , switchToPulseCircle  = windowChangeHapplet pulsecircle $ pulseCircleGUI testSuite
+        , switchToRedGrid      = windowChangeHapplet redgrid     $ redGridGUI     testSuite
         }
 
   attachWindow True win redgrid $ redGridGUI testSuite
@@ -72,7 +80,11 @@ redGridDraw scale winsize = do
 
 redGridGUI :: TestSuite -> PixSize -> GtkGUI RedGrid ()
 redGridGUI ctx _size = do
+  --let mvar = testSuiteSharedState ctx
   let draw size = use redGridScale >>= onCanvas . flip redGridDraw size
+  changeEvents $ liftIO $ do
+    putStrLn "change away from Red Grid"
+    --void $ swapMVar mvar "Red Grid"
   resizeEvents ClearCanvasMode $ \ _oldsize newsize -> cancelIfBusy >> draw newsize
   mouseEvents MouseAll $ \ mouse@(Mouse _ down _ button pt1@(V2 x y)) -> do
     when down $ case button of
@@ -88,10 +100,16 @@ redGridGUI ctx _size = do
         [ rect2D & rect2DHead .~ V2 (x - 22) (y - 22) & rect2DTail .~ V2 (x + 22) (y + 22) ]
     lastMouse .= Just pt1
     cancelIfBusy
-    onCanvas $ screenPrinter $ do
-      gridRow    .= 7
-      gridColumn .= 0
-      displayString $ show mouse
+    onCanvas $ do
+      screenPrinter $ do
+        gridRow    .= 7
+        gridColumn .= 0
+        displayString $ show mouse
+      --cairoRender $ do
+      --  cameFrom <- liftIO $ readMVar mvar
+      --  Cairo.moveTo  5.0  10.0
+      --  Cairo.setSourceRGBA  1.0  1.0  1.0  1.0
+      --  Cairo.showText $ "came from " <> cameFrom
     onOSBuffer $ cairoRender $ do
       Cairo.setLineWidth (3.0)
       Cairo.arc (realToFrac x) (realToFrac y) (20.0) (0.0) (2*pi)
@@ -140,6 +158,7 @@ pulseCircleGUI ctx initSize@(V2 (SampCoord w) (SampCoord h)) = do
     if oldW < 0 || oldH < 0 then V2 (realToFrac w / 2) (realToFrac h / 2) else old
   pulseCircleWindowSize .= initSize
 
+  --let mvar = testSuiteSharedState ctx
   -- Declare a function for drawing the model:
   let drawDot clear
         (PulseCircle{thePulseCircleRadius=oldR,thePulseCirclePosition=oldXY})
@@ -152,6 +171,15 @@ pulseCircleGUI ctx initSize@(V2 (SampCoord w) (SampCoord h)) = do
             when clear $ clearScreen bg
             circle oldXY (max oldR newR + 1.0) bg
             circle newXY           newR        color
+            --cairoRender $ do
+            --  cameFrom <- liftIO $ readMVar mvar
+            --  Cairo.moveTo  5.0  10.0
+            --  Cairo.setSourceRGBA  1.0  1.0  1.0  1.0
+            --  Cairo.showText $ "came from " <> cameFrom
+
+  changeEvents $ liftIO $ do
+    putStrLn "change away from Pulse Circle"
+--    void $ swapMVar mvar "Pulse Circle"
 
   keyboardEvents $ \ case
     (Keyboard True (ModifierBits 0) (CharKey ' ')) -> do
