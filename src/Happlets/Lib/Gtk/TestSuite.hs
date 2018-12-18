@@ -4,7 +4,7 @@ import           Happlets.Lib.Gtk
 
 import           Control.Concurrent.MVar
 
-import           Data.Semigroup
+--import           Data.Semigroup
 import qualified Data.Text as Strict
 
 import qualified Graphics.Rendering.Cairo as Cairo
@@ -80,11 +80,11 @@ redGridDraw scale winsize = do
 
 redGridGUI :: TestSuite -> PixSize -> GtkGUI RedGrid ()
 redGridGUI ctx _size = do
-  --let mvar = testSuiteSharedState ctx
+  let mvar = testSuiteSharedState ctx
   let draw size = use redGridScale >>= onCanvas . flip redGridDraw size
   changeEvents $ liftIO $ do
     putStrLn "change away from Red Grid"
-    --void $ swapMVar mvar "Red Grid"
+    void $ swapMVar mvar "Red Grid"
   resizeEvents ClearCanvasMode $ \ _oldsize newsize -> cancelIfBusy >> draw newsize
   mouseEvents MouseAll $ \ mouse@(Mouse _ down _ button pt1@(V2 x y)) -> do
     when down $ case button of
@@ -158,7 +158,7 @@ pulseCircleGUI ctx initSize@(V2 (SampCoord w) (SampCoord h)) = do
     if oldW < 0 || oldH < 0 then V2 (realToFrac w / 2) (realToFrac h / 2) else old
   pulseCircleWindowSize .= initSize
 
-  --let mvar = testSuiteSharedState ctx
+  let mvar = testSuiteSharedState ctx
   -- Declare a function for drawing the model:
   let drawDot clear
         (PulseCircle{thePulseCircleRadius=oldR,thePulseCirclePosition=oldXY})
@@ -179,7 +179,7 @@ pulseCircleGUI ctx initSize@(V2 (SampCoord w) (SampCoord h)) = do
 
   changeEvents $ liftIO $ do
     putStrLn "change away from Pulse Circle"
---    void $ swapMVar mvar "Pulse Circle"
+    void $ swapMVar mvar "Pulse Circle"
 
   keyboardEvents $ \ case
     (Keyboard True (ModifierBits 0) (CharKey ' ')) -> do
