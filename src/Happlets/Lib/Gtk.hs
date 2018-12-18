@@ -36,6 +36,7 @@ import           Happlets.Provider
 
 import           Control.Arrow
 import           Control.Concurrent
+import           Control.Exception
 
 import           Data.Array.MArray
 import           Data.Bits
@@ -93,14 +94,14 @@ import           Debug.Trace
 -- the debug messages that are selected are included in the compiled binary program.
 
 debugThisModule :: DebugTag
-debugThisModule  = mempty
+debugThisModule  = _fulldebug
 
 ------------------
 
 -- Debug function selection tags
 _mousevt, _keyevt, _animevt, _notanimevt, _drawevt, _winevt, _allevt, _ctxevt :: DebugTag
 _setup, _locks, _infra,  _fulldebug, _allbutanim :: DebugTag
-_miscA, _miscB :: DebugTag
+_miscA, _miscB, _exceptn :: DebugTag
 
 _mousevt    = DebugTag 0x00000001 -- only mouse events
 _keyevt     = DebugTag 0x00000002 -- only key events
@@ -113,9 +114,10 @@ _notanimevt = _exclude _animevt _allevt -- all events apart from animation event
 _locks      = DebugTag 0x00010000 -- MVar locking and unlocking  -- WARNING: extremely verbose!!!
 _infra      = DebugTag 0x00020000 -- the callback infrastructure -- WARNING: extremely verbose!!!
 _setup      = DebugTag 0x00040000
+_exceptn    = DebugTag 0x04000000 -- is always set, used to print errors in exception handlers
 _miscA      = DebugTag 0x01000000 -- is used to temporarily force a debug message
 _miscB      = DebugTag 0x02000000 -- is used to temporarily force a debug message
-_fulldebug  = _setup <> _allevt <> _locks <> _infra <> _miscA <> _miscB
+_fulldebug  = _setup <> _allevt <> _locks <> _infra <> _exceptn <> _miscA <> _miscB
 _allbutanim = _exclude _animevt _fulldebug
 
 -- Two miscelanea tags are provided, '_miscA' and '_miscB'. When looking through the source code in
@@ -138,6 +140,10 @@ _exclude excluded selector = selector .&. complement excluded
 
 type Log m = DebugTag -> String -> m ()
 
+newtype CaughtException = CaughtException SomeException
+deriving instance Show CaughtException
+instance Exception CaughtException
+
 mkLogger
   :: (Monad m, MonadIO m)
   => String -> m (Log IO)
@@ -147,7 +153,13 @@ mkLogger func = return $ \ sel msg -> if sel .&. debugThisModule == mempty then 
 {-# INLINE mkLogger #-}
 
 logSubIO :: Log IO -> DebugTag -> String -> IO a -> IO a
-logSubIO logIO sel msg f = logIO sel ("[BEGIN] "++msg) >> f <* logIO sel ("[ END ] "++msg)
+logSubIO logIO sel msg f = catches
+  (logIO sel ("[BEGIN] "++msg) >> f <* logIO sel ("[ END ] "++msg))
+  [ Handler $ \ (CaughtException e) -> throw e
+  , Handler $ \ some@(SomeException e) -> do
+      logIO _exceptn (msg++' ':show e) >>= evaluate
+      throw (CaughtException some)
+  ]
 {-# INLINE logSubIO #-}
 
 logSubGtk :: Log IO -> DebugTag -> String -> GtkState a -> GtkState a
@@ -331,7 +343,7 @@ data GtkWindowState
     , theKeyHandler           :: !(ConnectReact Keyboard)
     , theDetatchHandler       :: !(ConnectReact ())
     , theAnimatorThread       :: !(ConnectReact AnimationMoment)
-    , theContextSwitcher      :: !(GtkState ())
+    , theContextSwitcher      :: !(GtkState (EventHandlerControl ()))
     }
 
 data ConnectReact event
@@ -399,7 +411,7 @@ detatchHandler = lens theDetatchHandler $ \ a b -> a{ theDetatchHandler = b }
 -- the state is evaluated -- every single event handler will evaluate this function. To ensure that
 -- nothing happens unless it is set, this lens is used to set the callback to @return ()@ (a no-op)
 -- prior to evaluation of the 'GtkGUI' procedure in the 'liftGUIintoGtkState' function.
-contextSwitcher :: Lens' GtkWindowState (GtkState ())
+contextSwitcher :: Lens' GtkWindowState (GtkState (EventHandlerControl ()))
 contextSwitcher = lens theContextSwitcher $ \ a b -> a{ theContextSwitcher = b }
 
 animatorThread :: Lens' GtkWindowState (ConnectReact AnimationMoment)
@@ -455,7 +467,7 @@ lockGtkWindow logIO sel win f = case win of
     "lockGtkWindow: evaluated on an already locked 'GtkLockedWin' window."
 
 -- | This function evaluates 'Happlets.GUI.GUI' functions within event handlers. It evaluates to a
--- 'GtkState' function, which means you are required to have first evaluated 'unlockGtkWindow'. This
+-- 'GtkState' function, which means you are required to have first evaluated 'lockGtkWindow'. This
 -- function will then lock the 'Happlets.GUI.Happlet' and then evaluate the 'Happlets.GUI.GUI'
 -- function. If the 'Happlets.GUI.GUI' function evaluates to 'Happlets.GUI.disable' or
 -- 'Happlets.GUI.failGUI', then this function returns 'Prelude.False'. Otherwise, 'Prelude.True' is
@@ -464,24 +476,35 @@ liftGUIintoGtkState :: Happlet model -> GtkGUI model a -> GtkState (EventHandler
 liftGUIintoGtkState happlet f = do
   logIO <- mkLogger "liftGUIintoGtkState"
   -- (1) Always set 'contextSwitcher' to a no-op, it may be set to something else by @f@.
-  contextSwitcher .= return ()
+  contextSwitcher .= return (EventHandlerContinue ())
   winst <- get
-  ((result, gtkst), _) <- liftIO $
+  (result, winst) <- liftIO $
     logSubIO logIO _locks "Lock Happlet, evaluate GUI function." $ 
-      onHapplet happlet $ \ model -> do
-        (guiContin, guist) <- logSubIO logIO _infra "call runGUI" $
-          runGUI f GUIState
-            { theGUIHapplet = happlet
-            , theGUIWindow  = GtkLockedWin winst
-            , theGUIModel   = model
-            }
+      fmap fst $ onHapplet happlet $ \ model -> do
+        (guiContin, guist) <- logSubIO logIO _infra "call runGUI" $ runGUI f GUIState
+          { theGUIHapplet = happlet
+          , theGUIWindow  = GtkLockedWin winst
+          , theGUIModel   = model
+          }
         case theGUIWindow guist of
           GtkLockedWin winst -> return ((guiContin, winst), theGUIModel guist)
           GtkUnlockedWin{}   -> fail $
             "'runGUI' successfully completed, but returned state containing a locked window."
-  put gtkst -- Save the GtkState state produced by evaluation of the GtkGUI function.
-  -- (2) If the context switcher was not changed by @f@ between (1) and (2), it is still a no-op.
-  gtkst ^. contextSwitcher
+  --
+  put winst -- Save the GtkState state produced by evaluation of the GtkGUI function.
+  --
+  -- (2) Check if the result is 'HappletEventCancel', if it is, there is a chance that a context
+  -- switch occurred. The context switcher is always evaluated on a cancel signal. If the context
+  -- switcher was not changed by @f@ between (1) and (2), the 'contextSwitcher' field has therefore
+  -- not been changed from the (return ()) value (a no-op) set at (1) and so no context switch
+  -- occurs.
+  case result of
+    EventHandlerCancel -> winst ^. contextSwitcher >>= \ case
+      EventHandlerFail msg -> do
+        -- TODO: here, display error dialog box and halt program.
+        fail $ Strict.unpack msg
+      _                    -> return ()
+    _                  -> return ()
   return result
 
 -- | This function is intended to be passed as a parameter to 'liftGUIintoGtkState' by event handling
@@ -565,7 +588,7 @@ createWin cfg = do
         , theKeyHandler            = Disconnected
         , theDetatchHandler        = Disconnected
         , theAnimatorThread        = Disconnected
-        , theContextSwitcher       = return ()
+        , theContextSwitcher       = return (EventHandlerContinue ())
         }
   ((), env) <- flip runGtkState env $ do
     installExposeEventHandler
@@ -786,6 +809,7 @@ disconnectAll logIO = logSubGtk logIO _allevt "disconnectAll" $ do
   forceDisconnect logIO _mousevt "mouseHandler"       mouseHandler
   forceDisconnect logIO _keyevt  "keyHandler"         keyHandler
   forceDisconnect logIO _animevt "animatorThread"     animatorThread
+  forceDisconnect logIO _ctxevt  "detatchHandler"     detatchHandler
   forceDisconnect logIO _winevt  "resizeReaction"     resizeReaction
 
 ----------------------------------------------------------------------------------------------------
@@ -851,71 +875,83 @@ gtkAttachHapplet showWin win happ init = do
       logIO _winevt "Gtk.widgetShow"
       Gtk.widgetShow win
 
--- | Change the happlet displayed in the current window. Remove the current Happlet event handlers
--- and re-install the event handlers for the given Happlet. Note that this function never returns.
+-- | Change the happlet displayed in the current window, that is to say, this function performs a
+-- context switch. It removes the current Happlet event handlers and re-installs the event handlers
+-- for the given Happlet using the given initializer. Note that this function never returns, as the
+-- current happlet which evaluated this function will be halted so the context can switch over to
+-- the new Happlet.
 gtkSetHapplet :: Happlet newmodel -> (PixSize -> GtkGUI newmodel ()) -> GtkGUI oldmodel void
 gtkSetHapplet newHapp init = do
-  -- This function solves the problem of evaluating a 'GtkGUI' function of one type (newmodel)
-  -- within a 'GtkGUI' function of another type (oldmodel). It achieves this by converting
-  -- evaluation of the @init@ function to a function of type 'GtkState' and storing this function
-  -- into the 'contextSwitcher' field of the 'GtkWindowState'. The 'liftGUIintoGtkState' function
-  -- (which would evaluated the 'GUI' function that evaluated this 'gtkSetHapplet' function), will
-  -- then retrieve the content in 'contextSwitcher' that was set here in this function.
+  -- To perform a context switch, we must solve the problem of evaluating a 'GtkGUI' function of one
+  -- type (newmodel) within a 'GtkGUI' function of another type (oldmodel). We achieve this by
+  -- converting the @'GtkGUI' newmodel@ function into a model-agnostic 'GtkState' function, then we
+  -- use this constructed 'GtkState' function to set the 'contextSwticher' field. We then evaluating
+  -- 'cancelNow' and allow 'liftGUIintoGtkState' to evaluate the 'contextSwitcher'.
   logIO <- mkLogger "gtkSetHapplet"
-  oldHapp <- askHapplet
-  if sameHapplet oldHapp newHapp
-   then do
-    liftIO $ logIO _ctxevt $
-      "-- the Happlet given is the one that is already attached to this window"
-    cancelNow
-   else do
-    liftIO $ logIO _ctxevt $ "putGUIState -- set context switcher"
-    env <- theGUIWindow <$> getGUIState >>= \ case
-      GtkUnlockedWin{} -> fail "gtkSetHapplet evaluated on unlocked window"
-      GtkLockedWin env -> return env
-    let detatch = env ^. detatchHandler
-     -- Must obtain 'detatchHandler' now, all handlers will be cleared soon.
-    modifyGUIState $ (guiWindow .~) $ GtkLockedWin $ env & contextSwitcher .~ do
-      -- (1) This is the code that evaluates the initializer for the new happlet. It is not
-      -- evaluated here. Here we simply save this action into the 'contextSwitcher' field of the
-      -- 'GtkWindowState'. Refer to the 'liftGUIintoGtkState' function, you will see that every time
-      -- a 'GtkGUI' function is evaluated, the 'contextSwitcher' is set to @return ()@, then the GUI
-      -- function is evaluated, then the content of 'contextSwitcher' is retrieved and evaluated. If
-      -- this block of code has been placed into the 'contextSwitcher' field of the
-      -- 'GtkWindowState', it is evaluated just before the 'liftGUIintoGtkState' function completes
-      -- evaluating and concludes the event handler thread. Read section (2) of the comments below
-      -- to see what happens after the 'contextSwitcher' field is set.
-      logIO <- mkLogger "contextSwitcher"
-      liftIO $ logIO _ctxevt "-- has been set, now executing"
-      case detatch of
-        ConnectReact{doReact=f} -> logSubGtk logIO _ctxevt "detatchHandler" $ f ()
-        Disconnected            -> liftIO $ logIO _ctxevt "-- detatchHandler not set"
-      (>>= put) $ liftIO $ logSubIO logIO _ctxevt "-- evaluate target happlet initializer" $ do
-        size <- Gtk.widgetGetDrawWindow (gtkWindow env) >>= Gtk.drawableGetSize
-        win  <- liftM fst $ onHapplet newHapp $ \ model ->
-          fmap (theGUIWindow &&& theGUIModel) $
-          logSubIO logIO _ctxevt "-- call happlet initializer" $
-          execGUI (init $ sampCoord <$> uncurry V2 size) GUIState
+  liftIO $ logIO _ctxevt $ "putGUIState -- set context switcher"
+  -- Here we set the 'contextSwithcer' field to a function constructed by the 'gtkContextSwitch'
+  -- constructor, a function which essentialy converts the polymorphi @'GtkGUI' newmodel@ function
+  -- type to a concrete 'GtkState' function type.
+  modifyGUIState $ \ guist -> case guist ^. guiWindow of
+    GtkUnlockedWin{} -> error "gtkSetHapplet evaluated on unlocked window"
+    GtkLockedWin env -> guist & guiWindow .~ GtkLockedWin
+      (env & contextSwitcher .~ gtkContextSwitch (env ^. detatchHandler) newHapp init)
+  -- Then 'cancelNow' is called, immediately halting evaluation of this function. This ensures
+  -- that the 'GUI' function context which called this 'gtkSetHapplet' function will be halted
+  -- immediately and control will return to the 'liftGUIintoGtkState' function. It also ensures no
+  -- evaluation occurs after 'gtkSetHapplet' is evaluated, which is correct operational semantics
+  -- for this function according to the Happlet API.
+  liftIO $ logIO _ctxevt "cancelNow"
+  cancelNow
+  -- We use 'cancelNow' instead of 'deleteEventHandler' because 'disconnectAll' was already called
+  -- so we do not want any disconnect function to be evaluated again (which shouldn't cause any
+  -- harm, but doing so is an unnnecessary step). It is also for this reason that the
+  -- 'liftGUIintoGtkState' function only bothers to evaluate the context switcher when the return
+  -- signal is 'HappletEventCancel'. Please refer to the 'liftGUIintoGtkState' function to see
+  -- exactly what happens next, after the above 'cancelNow' is evaluated.
+
+-- | This function constructs a 'GtkState' function which performs a context switch. The constructed
+-- 'GtkState' function is stored in the 'contextSwitcher' field of the 'GtkWindowState'. Think of
+-- this function as a constructor which takes a polymorphic, model-specific 'Happlet' and it's
+-- initializer of type @'GtkGUI' newmodel'@ and constructs a function of the concrete,
+-- model-agnostic type 'GtkState' which behaves in the exact same way as the 'GtkGUI' function does.
+gtkContextSwitch
+  :: ConnectReact () -- ^ The 'detatchHandler'.
+  -> Happlet newmodel -- ^ the new Happlet which will be used to evaluate the initializer.
+  -> (PixSize -> GtkGUI newmodel ()) -- ^ the initializer which will install the new event handlers.
+  -> GtkState (EventHandlerControl ())
+gtkContextSwitch detatch newHapp init = do
+  logIO <- mkLogger "gtkContextSwitch"
+  liftIO $ logIO _ctxevt "-- has been set, now executing"
+  case detatch of
+    ConnectReact{doReact=f} -> logSubGtk logIO _ctxevt "detatchHandler" $ f ()
+    Disconnected            -> liftIO $ logIO _ctxevt "-- detatchHandler not set"
+  -- Eliminate the prior event handlers.
+  disconnectAll logIO
+  env <- get
+  -- Be very careful to use 'get' AFTER evaluating 'disconnectAll', because 'disconnectAll' is an
+  -- important stateful update and we would not want to use a stale @env@, lest the signal
+  -- disconnect functions be evaluated more than once.
+  --
+  -- Now evaluate the new event handler initializer for the new Happlet evaluation context. Note
+  -- that we do not use the 'liftGUIintoGtkState' function to perform this task, because
+  -- 'liftGUIintoGtkState' is programmed to trigger context switches, and we do not want to trigger
+  -- context switcher behavior here in the context switcher.
+  (>>= state . const) $ liftIO $ logSubIO logIO _ctxevt "-- evaluate new Happlet initializer" $ do
+    size  <- Gtk.widgetGetDrawWindow (gtkWindow env) >>= Gtk.drawableGetSize
+    logSubIO logIO _locks "Lock new Happlet that is target of context switch" $
+      fmap fst $ onHapplet newHapp $ \ model -> do
+        (guiContin, guist) <-
+          logSubIO logIO _ctxevt "-- call new Happlet initializer for context switch" $
+          runGUI (init $ sampCoord <$> uncurry V2 size) GUIState
             { theGUIWindow  = GtkLockedWin env
             , theGUIHapplet = newHapp
             , theGUIModel   = model
             }
-        return $ case win of
-          GtkLockedWin env -> env
-          GtkUnlockedWin{} -> error
+        case theGUIWindow guist of
+          GtkLockedWin winst -> return ((guiContin, winst), theGUIModel guist)
+          GtkUnlockedWin{}   -> fail
             "'evalGUI' was given an unlocked window, but it returned a locked window."
-    -- (2) After setting the 'contextSwitcher' field, the current 'Happlet's event handlers are all
-    -- deleted. Then 'cancelNow' is called, immediately halting evaluation of this function. This
-    -- ensures that control the 'GUI' function context which called this 'gtkSetHapplet' function
-    -- will be halted immediately and control will return to the 'liftGUIintoGtkState' function
-    -- which called this function. It also ensure no evaluation occurs after 'gtkSetHapplet' is
-    -- evaluated, which I think is a very intuitive operation semantics for this function. When
-    -- evaluation returns to 'liftGUIintoGtkState' the last thing that 'liftGUIintoGtkState' does is
-    -- evaluate the content of 'contextSwitcher' which was set just now in section (1) of the
-    -- comments.
-    liftGtkStateIntoGUI _ctxevt "gtkSetHapplet" $ disconnectAll logIO
-    liftIO $ logIO _ctxevt "cancelNow"
-    cancelNow -- not using 'deleteEventHandler' because 'disconnectAll' was already called.
 
 -- Set which function redraws the window.
 evalCairoOnCanvas :: CairoRender a -> GtkState a
@@ -1332,7 +1368,7 @@ instance CanAnimate GtkWindow where
         -- does not call it until after the first time step interval has passed. For slow
         -- animations, this will cause a noticable delay between the time the 'stepFrameEvents'
         -- function is evaluated and the first frame callback is evaluated.
-        liftIO $ logSubIO logIO _animevt "stepFrameEvents: handler init @t=0" (next 0)
+        --liftIO $ logSubIO logIO _animevt "stepFrameEvents: handler init @t=0" (next 0)
         return $ do
           logIO (_animevt<>sel) "Glib.signalDisconnect (Glib.on timeout)"
           modifyIORef t0ref $ \ ctrl -> ctrl{ animationThreadAlive = False }
