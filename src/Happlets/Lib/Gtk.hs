@@ -94,7 +94,7 @@ import           Debug.Trace
 -- the debug messages that are selected are included in the compiled binary program.
 
 debugThisModule :: DebugTag
-debugThisModule  = _fulldebug
+debugThisModule  = mempty
 
 ------------------
 
@@ -1344,37 +1344,47 @@ data AnimationThreadControl
 instance CanAnimate GtkWindow where
   animationIsRunning = liftGtkStateIntoGUI _animevt "animationIsRunning" $
     gets theAnimatorThread <&> \ case { Disconnected -> False; _ -> True; }
-  stepFrameEvents react = installEventHandler EventSetup
-    { eventDebugTag     = _animevt
-    , eventDescription  = "stepFrameEvents"
-    , eventLensReaction = animatorThread
-    , eventPreInstall   = return ()
-    , eventInstall      = \ logIO sel env next -> do
-        let rate = env & theAnimationFrameRate . currentConfig
-        t0    <- getCurrentTime
-        t0ref <- newIORef AnimationThreadControl
-          { animationThreadAlive = True
-          , animationInitTime    = t0
-          }
-        logIO (_animevt<>sel) "Glib.on timeout"
-        frame <- flip Glib.timeoutAdd (min 200 $ floor (1000.0 / rate)) $ do
-          (AnimationThreadControl
-            {animationThreadAlive=alive
-            ,animationInitTime=t0
-            }) <- readIORef t0ref
-          when alive $ diffUTCTime <$> getCurrentTime <*> pure t0 >>= next . realToFrac
-          animationThreadAlive <$> readIORef t0ref
-        -- The 'next' function needs to be evaluated here at time 0, becuase 'timeoutAdd'
-        -- does not call it until after the first time step interval has passed. For slow
-        -- animations, this will cause a noticable delay between the time the 'stepFrameEvents'
-        -- function is evaluated and the first frame callback is evaluated.
-        --liftIO $ logSubIO logIO _animevt "stepFrameEvents: handler init @t=0" (next 0)
-        return $ do
-          logIO (_animevt<>sel) "Glib.signalDisconnect (Glib.on timeout)"
-          modifyIORef t0ref $ \ ctrl -> ctrl{ animationThreadAlive = False }
-          Glib.timeoutRemove frame
-    , eventGUIReaction  = react
-    }
+  stepFrameEvents react = do
+    installEventHandler EventSetup
+      { eventDebugTag     = _animevt
+      , eventDescription  = "stepFrameEvents"
+      , eventLensReaction = animatorThread
+      , eventPreInstall   = return ()
+      , eventInstall      = \ logIO sel env next -> do
+          let rate = env & theAnimationFrameRate . currentConfig
+          t0    <- getCurrentTime
+          t0ref <- newIORef AnimationThreadControl
+            { animationThreadAlive = True
+            , animationInitTime    = t0
+            }
+          logIO (_animevt<>sel) "Glib.on timeout"
+          frame <- flip Glib.timeoutAdd (min 200 $ floor (1000.0 / rate)) $ do
+            (AnimationThreadControl
+              {animationThreadAlive=alive
+              ,animationInitTime=t0
+              }) <- readIORef t0ref
+            when alive $ diffUTCTime <$> getCurrentTime <*> pure t0 >>= next . realToFrac
+            animationThreadAlive <$> readIORef t0ref
+          return $ do
+            logIO (_animevt<>sel) "Glib.signalDisconnect (Glib.on timeout)"
+            modifyIORef t0ref $ \ ctrl -> ctrl{ animationThreadAlive = False }
+            Glib.timeoutRemove frame
+      , eventGUIReaction  = react
+      }
+    -- The 'react' function needs to be evaluated here at time 0, becuase 'timeoutAdd' does not call
+    -- it until after the first time step interval has passed. For slow animations, this will cause
+    -- a noticable delay between the time the 'stepFrameEvents' function is evaluated and the first
+    -- frame callback is evaluated.
+    let disconnect msg = liftGtkStateIntoGUI _animevt "stepFrameEvents" $ do
+          logIO <- mkLogger "stepFrameEvents"
+          forceDisconnect logIO _animevt
+            ("-- frame 0 triggered animation halt" ++ msg)
+            animatorThread
+    guiCatch (react 0) $ \ case
+      EventHandlerContinue () -> return ()
+      EventHandlerFail    msg -> disconnect (", " ++ Strict.unpack msg)
+      EventHandlerCancel      -> disconnect ""
+      EventHandlerHalt        -> disconnect ""
 
 instance CanKeyboard GtkWindow where
   keyboardEvents react = installEventHandler EventSetup
