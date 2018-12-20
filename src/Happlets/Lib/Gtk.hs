@@ -100,7 +100,7 @@ debugThisModule  = mempty
 
 -- Debug function selection tags
 _mousevt, _keyevt, _animevt, _notanimevt, _drawevt, _winevt, _allevt, _ctxevt :: DebugTag
-_setup, _locks, _infra,  _fulldebug, _allbutanim :: DebugTag
+_setup, _locks, _infra, _workers, _fulldebug, _allbutanim, _nonverbose :: DebugTag
 _miscA, _miscB, _exceptn :: DebugTag
 
 _mousevt    = DebugTag 0x00000001 -- only mouse events
@@ -115,10 +115,12 @@ _locks      = DebugTag 0x00010000 -- MVar locking and unlocking  -- WARNING: ext
 _infra      = DebugTag 0x00020000 -- the callback infrastructure -- WARNING: extremely verbose!!!
 _setup      = DebugTag 0x00040000
 _exceptn    = DebugTag 0x04000000 -- is always set, used to print errors in exception handlers
+_workers    = DebugTag 0x08000000 -- when evaluating a 'Worker' thread (can be very verbose)
 _miscA      = DebugTag 0x01000000 -- is used to temporarily force a debug message
 _miscB      = DebugTag 0x02000000 -- is used to temporarily force a debug message
-_fulldebug  = _setup <> _allevt <> _locks <> _infra <> _exceptn <> _miscA <> _miscB
+_fulldebug  = _setup <> _allevt <> _locks <> _infra <> _exceptn <> _workers <> _miscA <> _miscB
 _allbutanim = _exclude _animevt _fulldebug
+_nonverbose = _exclude (_animevt <> _infra <> _locks <> _workers) _fulldebug
 
 -- Two miscelanea tags are provided, '_miscA' and '_miscB'. When looking through the source code in
 -- this file, if you find a debug logging function that you want to force to output, even if it's
@@ -335,6 +337,7 @@ data GtkWindowState
     , gtkWindow               :: !Gtk.Window
     , theGtkEventBox          :: !Gtk.EventBox
     , theCairoRenderState     :: !CairoRenderState
+    , theGovernment           :: !WorkerUnion
     , theInitReaction         :: !(ConnectReact PixSize)
     , theResizeReaction       :: !(ConnectReact (OldPixSize, NewPixSize))
     , theVisibilityReaction   :: !(ConnectReact Bool)
@@ -485,6 +488,7 @@ liftGUIintoGtkState happlet f = do
           { theGUIHapplet = happlet
           , theGUIWindow  = GtkLockedWin winst
           , theGUIModel   = model
+          , theGUIWorkers = theGovernment winst
           }
         case theGUIWindow guist of
           GtkLockedWin winst -> return ((guiContin, winst), theGUIModel guist)
@@ -568,6 +572,7 @@ createWin cfg = do
   Gtk.containerAdd window eventBox
   this <- newEmptyMVar
   live <- newEmptyMVar
+  gov  <- newWorkerUnion
   let env = GtkWindowState
         { currentConfig            = cfg
         , thisWindow               = this
@@ -580,6 +585,7 @@ createWin cfg = do
             , theCairoRenderMode         = VectorMode
             , theCairoScreenPrinterState = screenPrinterState
             }
+        , theGovernment            = gov
         , theInitReaction          = Disconnected
         , theResizeReaction        = Disconnected
         , theVisibilityReaction    = Disconnected
@@ -947,6 +953,7 @@ gtkContextSwitch detatch newHapp init = do
             { theGUIWindow  = GtkLockedWin env
             , theGUIHapplet = newHapp
             , theGUIModel   = model
+            , theGUIWorkers = theGovernment env
             }
         case theGUIWindow guist of
           GtkLockedWin winst -> return ((guiContin, winst), theGUIModel guist)
@@ -1328,6 +1335,16 @@ instance Managed GtkWindow where
           Glib.signalDisconnect focout
     , eventGUIReaction  = react
     }
+
+instance CanRecruitWorkers GtkWindow where
+  inOtherThreadRunGUI guist gui = do
+    logIO <- mkLogger "inOtherThreadRunGUI"
+    lockGtkWindow logIO _workers (theGUIWindow guist) $ do
+      winst <- get
+      (result, guist) <- liftIO $ runGUI gui guist{ theGUIWindow = GtkLockedWin winst }
+      state $ const $ (,) result $! case theGUIWindow guist of
+        GtkLockedWin winst -> winst
+        _                  -> error "runGUI returned unlocked window"
 
 instance CanResize GtkWindow where
   resizeEvents mode react = installEventHandler
