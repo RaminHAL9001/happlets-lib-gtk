@@ -333,6 +333,13 @@ data GtkWindowState
   = GtkWindowState
     { currentConfig           :: !Config
     , thisWindow              :: !(MVar GtkWindowState)
+      -- ^ While a GUI function is evaluating, 'theGUIWindow' is always locked, i.e. set to the
+      -- 'GtkLockedWin' state. This is problematic for spawning new threads, because the new thread
+      -- will need to share the lock with the thread that spawned it. To solve this problem, a
+      -- reference to the lock is stored in the 'thisWindow' pointer. Whenever a new thread is
+      -- created, usually when installing an event handler or when launching a 'Worker' thread, the
+      -- 'GUIState' used to evaluate the 'GUI' function in the new thread is reset to contain the
+      -- 'thisWindow' reference.
     , gtkWindowLive           :: !(MVar GtkWindowLive)
     , gtkWindow               :: !Gtk.Window
     , theGtkEventBox          :: !Gtk.EventBox
@@ -492,7 +499,7 @@ liftGUIintoGtkState happlet f = do
           }
         case theGUIWindow guist of
           GtkLockedWin winst -> return ((guiContin, winst), theGUIModel guist)
-          GtkUnlockedWin{}   -> fail $
+          GtkUnlockedWin{}   -> error
             "'runGUI' successfully completed, but returned state containing a locked window."
   --
   put winst -- Save the GtkState state produced by evaluation of the GtkGUI function.
@@ -1339,7 +1346,18 @@ instance Managed GtkWindow where
 instance CanRecruitWorkers GtkWindow where
   inOtherThreadRunGUI guist gui = do
     logIO <- mkLogger "inOtherThreadRunGUI"
-    lockGtkWindow logIO _workers (theGUIWindow guist) $ do
+    -- While a GUI function is evaluating, 'theGUIWindow' is always locked, i.e. set to the
+    -- 'GtkLockedWin' state. This is problematic for spawning new threads, because the new thread
+    -- will need to share the lock with the thread that spawned it. To solve this problem, a
+    -- reference to the lock is stored in the 'thisWindow' pointer. Whenever a new thread is
+    -- created, usually when installing an event handler or when launching a 'Worker' thread, the
+    -- 'GUIState' used to evaluate the 'GUI' function in the new thread is reset to contain the
+    -- 'thisWindow' reference.
+    lockedWinRef <- case theGUIWindow guist of
+      GtkLockedWin winst -> pure $ GtkUnlockedWin $ thisWindow winst
+      GtkUnlockedWin{}   -> error
+        "inOtherThreadGUI: was given GUIState containing a locked window."
+    lockGtkWindow logIO _workers lockedWinRef $ do
       winst <- get
       (result, guist) <- liftIO $ runGUI gui guist{ theGUIWindow = GtkLockedWin winst }
       state $ const $ (,) result $! case theGUIWindow guist of
@@ -1589,10 +1607,10 @@ installEventHandler setup = do
   happ  <- askHapplet
   let dbgmsg = "installEventHandler "++what
   liftGtkStateIntoGUI sel dbgmsg $ do
-    env <- get
     forceDisconnect logIO sel what (eventLensReaction setup)
     liftIO $ logIO sel $ "-- preinstall "++what++" event handler"
     preinstall
+    env <- get
     disconnect <- liftIO $ do
       logIO sel $ "-- install "++what++"event handler"
       install logIO sel env $ \ event -> do
