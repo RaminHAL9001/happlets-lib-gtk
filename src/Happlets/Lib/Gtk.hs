@@ -1359,8 +1359,14 @@ instance CanRecruitWorkers GtkWindow where
         "inOtherThreadGUI: was given GUIState containing a locked window."
     lockGtkWindow logIO _workers lockedWinRef $ do
       winst <- get
-      (result, guist) <- liftIO $ runGUI gui guist{ theGUIWindow = GtkLockedWin winst }
-      state $ const $ (,) result $! case theGUIWindow guist of
+      liftIO $ hPutStrLn stderr "Worker thread lock Happlet"
+      ((result, winst), _model) <- liftIO $ onHapplet (theGUIHapplet guist) $ \ model -> do
+        (result, guist) <- runGUI gui guist
+          { theGUIWindow = GtkLockedWin winst
+          , theGUIModel  = model
+          }
+        return ((result, theGUIWindow guist), theGUIModel guist)
+      state $ const $ (,) result $! case winst of
         GtkLockedWin winst -> winst
         _                  -> error "runGUI returned unlocked window"
 

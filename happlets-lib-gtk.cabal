@@ -51,6 +51,10 @@ DESCRIPTION:
     the "Happlets.Lib.Gtk.TestSuite" executable program. Refer to the source
     code for "TestSuite" to see how the application is structured.
     .
+    *NOTE:* Happlets uses OS bound threads ('Control.Concurrent.forkOS')
+    to provide multithreading capabilities, when building an executable
+    application, be sure to use the -threaded option in GHC-OPTIONS.
+    .
     The goal of the Happlets project is to allow you to create very simple,
     thread-safe applications that contain nothing more than a single window
     with a drawing canvas that can respond to user input events, like mouse
