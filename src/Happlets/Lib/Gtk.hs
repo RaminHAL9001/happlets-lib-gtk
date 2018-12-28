@@ -1359,7 +1359,6 @@ instance CanRecruitWorkers GtkWindow where
         "inOtherThreadGUI: was given GUIState containing a locked window."
     lockGtkWindow logIO _workers lockedWinRef $ do
       winst <- get
-      liftIO $ hPutStrLn stderr "Worker thread lock Happlet"
       ((result, winst), _model) <- liftIO $ onHapplet (theGUIHapplet guist) $ \ model -> do
         (result, guist) <- runGUI gui guist
           { theGUIWindow = GtkLockedWin winst
@@ -1369,6 +1368,28 @@ instance CanRecruitWorkers GtkWindow where
       state $ const $ (,) result $! case winst of
         GtkLockedWin winst -> winst
         _                  -> error "runGUI returned unlocked window"
+  launchWorkerThread _guist wu cycle getWorker task = do
+    worker <- getWorker
+    let finish stat = setWorkerStatus worker stat >> retireWorker wu worker
+    let fork stat t = do
+          halt <- fmap Gtk.timeoutRemove $ flip Gtk.timeoutAdd (round $ t * 1000) $ do
+            setWorkerStatus worker WorkerBusy
+            task worker >>= \ case
+              EventHandlerContinue{} -> setWorkerStatus worker WorkerPaused >> return True
+              EventHandlerCancel     -> setWorkerStatus worker WorkerPaused >> return True
+              EventHandlerHalt       -> finish WorkerHalted >> return False
+              EventHandlerFail   msg -> finish (WorkerFailed msg) >> return False
+          setWorkerStatus worker stat
+          return halt
+    unionizeWorker wu worker
+    liftIO $ case cycle of
+      WorkCycleASAP   -> fork WorkerWaiting (0.001 :: Double)
+      WorkWaitCycle t -> fork WorkerPaused t
+      WorkCycleWait t -> task worker >>= \ case
+        EventHandlerContinue{} -> fork WorkerPaused t
+        EventHandlerCancel     -> fork WorkerPaused t
+        EventHandlerHalt       -> finish WorkerHalted >> return (pure ())
+        EventHandlerFail   msg -> finish (WorkerFailed msg) >> return (pure ())
 
 instance CanResize GtkWindow where
   resizeEvents mode react = installEventHandler
