@@ -1369,27 +1369,35 @@ instance CanRecruitWorkers GtkWindow where
         GtkLockedWin winst -> winst
         _                  -> error "runGUI returned unlocked window"
   launchWorkerThread _guist wu cycle getWorker task = do
+    logIO <- mkLogger "launchWorkerThread"
+    logIO _workers $ "getWorker"
     worker <- getWorker
-    let finish stat = setWorkerStatus worker stat >> retireWorker wu worker
-    let fork stat t = do
-          halt <- fmap Gtk.timeoutRemove $ flip Gtk.timeoutAdd (round $ t * 1000) $ do
+    logIO _workers $ "getWorker -> "++show worker
+    let finish stat = do
+          setWorkerStatus worker stat
+          logIO _workers $ "retireWorker "++show worker
+          retireWorker wu worker
+    let timeoutRemove sig = logIO _workers "Gtk.timeoutRemove" >> Gtk.timeoutRemove sig
+    let fork stat more t' = do
+          let t = round $ (t' :: Double) * 1000
+          logIO _workers $ "Gtk.timeoutAdd " ++ show t
+          halt <- fmap timeoutRemove $ flip Gtk.timeoutAdd t $ do
             setWorkerStatus worker WorkerBusy
             task worker >>= \ case
-              EventHandlerContinue{} -> setWorkerStatus worker WorkerPaused >> return True
-              EventHandlerCancel     -> setWorkerStatus worker WorkerPaused >> return True
+              EventHandlerContinue{} -> setWorkerStatus worker WorkerPaused >> return more
+              EventHandlerCancel     -> setWorkerStatus worker WorkerPaused >> return more
               EventHandlerHalt       -> finish WorkerHalted >> return False
               EventHandlerFail   msg -> finish (WorkerFailed msg) >> return False
           setWorkerStatus worker stat
           return halt
+    logIO _workers $ "unionizeWorker "++show worker
     unionizeWorker wu worker
     liftIO $ case cycle of
-      WorkCycleASAP   -> fork WorkerWaiting (0.001 :: Double)
-      WorkWaitCycle t -> fork WorkerPaused t
-      WorkCycleWait t -> task worker >>= \ case
-        EventHandlerContinue{} -> fork WorkerPaused t
-        EventHandlerCancel     -> fork WorkerPaused t
-        EventHandlerHalt       -> finish WorkerHalted >> return (pure ())
-        EventHandlerFail   msg -> finish (WorkerFailed msg) >> return (pure ())
+      WorkCycleASAP   -> fork WorkerWaiting True 0
+      WorkWaitCycle t -> fork WorkerPaused  True t
+      WorkCycleWait t -> do
+        fork WorkerWaiting False 0 -- Run a single initial cycle with no pause,
+        fork WorkerWaiting True  t -- then start the repeating cycle with the requested pause.
 
 instance CanResize GtkWindow where
   resizeEvents mode react = installEventHandler
