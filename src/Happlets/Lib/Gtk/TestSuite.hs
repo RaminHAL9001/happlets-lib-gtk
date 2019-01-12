@@ -73,9 +73,9 @@ redGridDraw scale winsize = do
     clearScreen (black & alphaChannel .~ 0.9)
     forM_ (around w centerX) $ drawLine red 1.0 . mkLine V2 h
     forM_ (around h centerY) $ drawLine red 1.0 . mkLine (flip V2) w
-    screenPrinter $ do
-      gridRow    .= 1
-      gridColumn .= 1
+    void $ screenPrinter $ do
+      gridRow    .= 0
+      gridColumn .= 0
       displayString $ "Grid square size = " ++ show scale
 
 redGridGUI :: TestSuite -> PixSize -> GtkGUI RedGrid ()
@@ -100,11 +100,10 @@ redGridGUI ctx _size = do
         [ rect2D & rect2DHead .~ V2 (x - 22) (y - 22) & rect2DTail .~ V2 (x + 22) (y + 22) ]
     lastMouse .= Just pt1
     cancelIfBusy
-    onCanvas $ do
-      screenPrinter $ do
-        gridRow    .= 7
-        gridColumn .= 0
-        displayString $ show mouse
+    onCanvas $ screenPrinter $ withFontStyle (do{ fontForeColor .= white; fontSize .= 16.0; }) $ do
+      gridRow    .= 1
+      gridColumn .= 0
+      displayString $ show mouse
       --cairoRender $ do
       --  cameFrom <- liftIO $ readMVar mvar
       --  Cairo.moveTo  5.0  10.0

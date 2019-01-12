@@ -13,7 +13,7 @@ module Happlets.Lib.Gtk
     -- function, but using point, line, and color values specified in the "Happlets.Draw"
     -- sub-modules.
     CairoRender, cairoRender, GtkCairoDiagram, gtkCairoDiagram,
-    cairoClearCanvas, cairoSetColor,
+    cairoClearCanvas, cairoSetColor, cairoGridLocationOfPoint,
     cairoDrawPath, cairoMoveTo, cairoLineTo, cairoDrawLine,
     cairoDrawRect, cairoPreserve,
     cairoFlush, cairoSetPoint, cairoGetPoint, cairoInvalidate,
@@ -227,7 +227,7 @@ data CairoRenderMode
 data CairoRenderState
   = CairoRenderState
     { theCairoKeepWinSize        :: !PixSize
-    --  , theMinFontExtents          :: !(Maybe Cairo.FontExtents)
+    , theCairoFontExtents        :: !(Maybe Cairo.FontExtents)
     , theCanvasResizeMode        :: !CanvasMode
     , theCairoRenderMode         :: !CairoRenderMode
     , theCairoScreenPrinterState :: !ScreenPrinterState
@@ -236,8 +236,11 @@ data CairoRenderState
 cairoKeepWinSize :: Lens' CairoRenderState PixSize
 cairoKeepWinSize = lens theCairoKeepWinSize $ \ a b -> a{ theCairoKeepWinSize = b }
 
---minFontExtents :: Lens' CairoRenderState (Maybe Cairo.FontExtents)
---minFontExtents = lens theMinFontExtents $ \ a b -> a{ theMinFontExtents = b }
+--cairoRenderFontStyle :: Lens' CairoRenderState FontStyle
+--cairoRenderFontStyle = lens theCairoRenderFontStyle $ \ a b -> a{ theCairoRenderFontStyle = b }
+
+cairoFontExtents :: Lens' CairoRenderState (Maybe Cairo.FontExtents)
+cairoFontExtents = lens theCairoFontExtents $ \ a b -> a{ theCairoFontExtents = b }
 
 cairoRenderMode :: Lens' CairoRenderState CairoRenderMode
 cairoRenderMode = lens theCairoRenderMode $ \ a b -> a{ theCairoRenderMode = b }
@@ -257,8 +260,7 @@ cairoRender = CairoRender . lift
 -- | Extract a @"Graphics.Rendering.Cairo".'Cairo.Render'@ from a 'CairoRender' function type.
 runCairoRender
   :: PixSize -> CairoRenderState -> CairoRender a -> Cairo.Render (a, CairoRenderState)
-runCairoRender winsize rendst (CairoRender f) =
-  runStateT (lift (cairoSetFontStyle defaultFontStyle) >> f) (rendst & cairoKeepWinSize .~ winsize)
+runCairoRender winsize rendst (CairoRender f) = runStateT f (rendst & cairoKeepWinSize .~ winsize)
 
 -- | Switch to vector mode (only if it isn't already) which marks the surface as "dirty" in the
 -- smallest possible rectangle containing all points. This function is called before every vector
@@ -588,6 +590,7 @@ createWin cfg = do
         , theGtkEventBox           = eventBox
         , theCairoRenderState      = CairoRenderState
             { theCairoKeepWinSize        = V2 0 0
+            , theCairoFontExtents        = Nothing
             , theCanvasResizeMode        = ClearCanvasMode
             , theCairoRenderMode         = VectorMode
             , theCairoScreenPrinterState = screenPrinterState
@@ -898,12 +901,12 @@ gtkSetHapplet newHapp init = do
   -- To perform a context switch, we must solve the problem of evaluating a 'GtkGUI' function of one
   -- type (newmodel) within a 'GtkGUI' function of another type (oldmodel). We achieve this by
   -- converting the @'GtkGUI' newmodel@ function into a model-agnostic 'GtkState' function, then we
-  -- use this constructed 'GtkState' function to set the 'contextSwticher' field. We then evaluating
+  -- use this constructed 'GtkState' function to set the 'contextSwticher' field. We then evaluate
   -- 'cancelNow' and allow 'liftGUIintoGtkState' to evaluate the 'contextSwitcher'.
   logIO <- mkLogger "gtkSetHapplet"
   liftIO $ logIO _ctxevt $ "putGUIState -- set context switcher"
   -- Here we set the 'contextSwithcer' field to a function constructed by the 'gtkContextSwitch'
-  -- constructor, a function which essentialy converts the polymorphi @'GtkGUI' newmodel@ function
+  -- constructor, a function which essentialy converts the polymorphic @'GtkGUI' newmodel@ function
   -- type to a concrete 'GtkState' function type.
   modifyGUIState $ \ guist -> case guist ^. guiWindow of
     GtkUnlockedWin{} -> error "gtkSetHapplet evaluated on unlocked window"
@@ -1100,72 +1103,109 @@ instance Happlet2DGraphics CairoRender where
     rasterMode x y >> cairoRender (cairoSetPoint a b)
 
 instance RenderText CairoRender where
-  getGridCellSize = cairoRender $ (/ 24.0) <$> cairoGetDPI
---    CairoRender $ use minFontExtents >>= \ case
---      Just ext -> return $ Cairo.fontExtentsMaxXadvance ext
---      Nothing  -> do
---        ext <- lift cairoGetMinFontExtents
---        minFontExtents .= Just ext
---        return $ (\x -> trace ("SET GRID SIZE = "++show x) x) $ Cairo.fontExtentsHeight ext / 2
+  getRendererFontStyle = CairoRender $ use $ cairoScreenPrinterState . fontStyle
+  setRendererFontStyle style' = do
+    logIO <- mkLogger "setRenderFontStyle"
+    CairoRender $ do
+      let style = style' &~ do
+            fontSize %= max 6.0 . min 600.0
+      cairoScreenPrinterState . fontStyle .= style
+      liftIO $ logIO _drawevt $ "setRendererFontStyle " ++ show style
+      ext <- lift $ do
+        Cairo.selectFontFace ("monospace" :: Strict.Text)
+          (if theFontItalic style then Cairo.FontSlantItalic else Cairo.FontSlantNormal )
+          (if theFontBold   style then Cairo.FontWeightBold  else Cairo.FontWeightNormal)
+        Cairo.setFontSize $ theFontSize style
+        Cairo.fontExtents
+      cairoFontExtents .= Just ext
+      return style
+
+  getGridCellSize = fmap realToFrac <$> getGridCellSizeDouble
+  getWindowTextGridSize = do
+    (V2 txtW txtH) <- getGridCellSizeDouble
+    (V2 winW winH) <- CairoRender $ use cairoKeepWinSize
+    return $ TextGridLocation
+      (TextGridRow    $ ceiling $ realToFrac winH / txtH)
+      (TextGridColumn $ ceiling $ realToFrac winW / txtW)
     
-  getWindowGridCellSize = do
-    size <- getGridCellSize
-    (V2 w h) <- CairoRender $ use cairoKeepWinSize
-    return $ V2 (realToFrac w / size) (realToFrac h / size)
-    
-  screenPrintCharNoAdvance st c = unless (not (isPrint c) || wcwidth c <= 0) $ do
-    let fs = st ^. printerFontStyle
-    let bgcolor = fs ^. fontBackColor
-    let off@(V2 offX offY) = st ^. renderOffset
-    let loc = st ^. textCursor
-    loc0@(V2 x0 _y0) <- (+ (off - V2 (2.0) (3.0))) <$> gridTextLocationToPoint loc
-    dLoc <- fmap realToFrac <$> getPixSizeOfChar (fs ^. fontSize) c
-    rendst <- CairoRender get
-    --rendst <- case rendst ^. minFontExtents of
-    --  Just{}  -> return rendst
-    --  Nothing -> do
-    --    extns <- cairoRender $ cairoGetMinFontExtents <* cairoSetFontStyle fs
-    --    CairoRender $ do
-    --      minFontExtents .= Just extns
-    --      cairoScreenPrinterState . printerFontStyle .= fs
-    --      get
-    let loc1@(V2 _x1 y1) = loc0 + dLoc
-    extns  <- cairoRender $ do
-      Cairo.setOperator Cairo.OperatorSource
-      cairoDrawRect bgcolor (0.0) bgcolor
-        (rect2D & rect2DHead .~ (realToFrac <$> loc0) & rect2DTail .~ (realToFrac <$> loc1))
-      cairoSetColor $ fs ^. fontForeColor
-      when (rendst ^. cairoScreenPrinterState . printerFontStyle /= fs) (cairoSetFontStyle fs)
-      Cairo.fontExtents
-    cairoRender $ do
-      Cairo.moveTo (x0 + 0.5 + offX) (y1 - 0.5 + offY - Cairo.fontExtentsDescent extns)
-      Cairo.showText (c:"")
-      Cairo.fill
+  gridLocationOfPoint = cairoGridLocationOfPoint . fmap realToFrac
+  gridLocationToPoint (TextGridLocation (TextGridRow row) (TextGridColumn col)) = do
+    fsiz <- CairoRender $ use $ cairoScreenPrinterState . fontStyle . fontSize
+    ext  <- cairoGetFontExtents
+    let fontHeight = max (Cairo.fontExtentsMaxYadvance ext) fsiz
+    let fontWidth  = max (Cairo.fontExtentsMaxXadvance ext) (fontHeight / 2.0)
+    let descent    = Cairo.fontExtentsDescent ext
+    return $ V2
+      (realToFrac col * fontWidth)
+      ((fontHeight + descent) * realToFrac (row + 1) - descent + 0.5)
+
+  screenPrintNoAdvance st = cairoPrintNoAdvance True st . fst . spanPrintable
+  screenPrintCharNoAdvance st c =
+    if not (isPrint c) then return Nothing else cairoPrintNoAdvance True st (c:"")
+
+  getStringBoundingBox st = cairoPrintNoAdvance False st . fst . spanPrintable
+  getCharBoundingBox st c =
+    if not (isPrint c) then return Nothing else cairoPrintNoAdvance False st (c:"")
 
   saveScreenPrinterState = CairoRender . modifying cairoScreenPrinterState . const
   recallSavedScreenPrinterState = CairoRender $ use cairoScreenPrinterState
 
--- | TODO: obtain this value from Gtk, Glib, or Cairo.
-cairoGetDPI :: Cairo.Render Double
-cairoGetDPI = return 96.0
+---- | TODO: obtain this value from Gtk, Glib, or Cairo.
+--cairoGetDPI :: Cairo.Render Double
+--cairoGetDPI = return 96.0
 
---cairoGetMinFontExtents :: Cairo.Render Cairo.FontExtents
---cairoGetMinFontExtents = do
---  Cairo.save
---  Cairo.selectFontFace ("monospace" :: Strict.Text) Cairo.FontSlantNormal Cairo.FontWeightNormal
---  dpi <- cairoGetDPI
---  Cairo.setFontSize (dpi / 12.0)
---  Cairo.fontExtents
---    <* Cairo.restore
+cairoGetFontExtents :: CairoRender Cairo.FontExtents
+cairoGetFontExtents = do
+  ext <- CairoRender $ use cairoFontExtents
+  case ext of
+    Just ext -> return ext
+    Nothing  -> do
+      setRendererFontStyle defaultFontStyle
+      CairoRender $ do
+        ext <- lift $ Cairo.fontExtents
+        cairoFontExtents .= Just ext
+        return ext
 
-cairoSetFontStyle :: FontStyle -> Cairo.Render ()
-cairoSetFontStyle fs = do
-  dpi <- cairoGetDPI
-  let fontsizemin = dpi / 12.0
-  Cairo.setFontSize $ fontsizemin * realToFrac (fontSizeMultiple $ fs ^. fontSize)
-  Cairo.selectFontFace ("monospace" :: Strict.Text)
-    (if fs ^. fontItalic then Cairo.FontSlantItalic else Cairo.FontSlantNormal )
-    (if fs ^. fontBold   then Cairo.FontWeightBold  else Cairo.FontWeightNormal)
+-- not for export
+-- This does NOT evaluate 'spanPrintable' so it must not be exported.
+cairoPrintNoAdvance :: Bool -> ScreenPrinterState -> String -> CairoRender (Maybe TextBoundingBox)
+cairoPrintNoAdvance doDisplay st str = do
+  let style = theFontStyle st
+  let (TextGridLocation (TextGridRow row) (TextGridColumn col)) = theTextCursor st
+  (V2 gridW gridH) <- getGridCellSizeDouble
+  (V2  offX  offY) <- gridLocationToPoint $ theTextCursor st
+  cairoRender $ do
+    ext <- Cairo.textExtents str
+    let size = V2 (Cairo.textExtentsXbearing ext) (Cairo.textExtentsYbearing ext)
+    let pt   = V2 (realToFrac col * gridW + 0.5) (realToFrac row * gridH + 0.5)
+    let rect = Rect2D pt (pt + size)
+    when doDisplay $ do
+      cairoDrawRect (theFontBackColor style) 0 (theFontBackColor style) (RealApprox <$> rect)
+      Cairo.moveTo offX offY
+      cairoSetColor $ theFontForeColor style
+      Cairo.setFontSize $ theFontSize style
+      Cairo.showText str
+      Cairo.fill
+    return $ Just rect
+
+withCairoFontExtents :: (Double -> Double -> Double -> a) -> CairoRender a
+withCairoFontExtents f = do
+  fsiz  <- CairoRender $ use $ cairoScreenPrinterState . fontStyle . fontSize
+  ext <- cairoGetFontExtents
+  let fontHeight = max (Cairo.fontExtentsMaxYadvance ext) fsiz
+  let fontWidth  = max (Cairo.fontExtentsMaxXadvance ext) (fontHeight / 2.0)
+  let descent    = Cairo.fontExtentsDescent ext
+  return $ f fontHeight fontWidth descent
+
+getGridCellSizeDouble :: CairoRender (Size2D Double)
+getGridCellSizeDouble = withCairoFontExtents $ \ fontHeight fontWidth descent -> 
+  V2 fontWidth (fontHeight + descent)
+
+cairoGridLocationOfPoint :: Point2D Double -> CairoRender TextGridLocation
+cairoGridLocationOfPoint (V2 x y) =
+  withCairoFontExtents $ \ fontHeight fontWidth descent -> TextGridLocation
+    (TextGridRow    $ floor $ y / (fontHeight + descent))
+    (TextGridColumn $ floor $ x / fontWidth)
 
 cairoArray :: (Int -> Int -> Cairo.SurfaceData Int Word32 -> IO a) -> Cairo.Render a
 cairoArray f = Cairo.withTargetSurface $ \ surface -> do
