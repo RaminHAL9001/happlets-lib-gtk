@@ -13,7 +13,7 @@ module Happlets.Lib.Gtk
     -- function, but using point, line, and color values specified in the "Happlets.Draw"
     -- sub-modules.
     CairoRender, cairoRender, GtkCairoDiagram, gtkCairoDiagram,
-    cairoClearCanvas, cairoSetColor, cairoGridLocationOfPoint,
+    cairoClearCanvas, cairoSetFontStyle, cairoSetColor, cairoGridLocationOfPoint,
     cairoDrawPath, cairoMoveTo, cairoLineTo, cairoDrawLine,
     cairoDrawRect, cairoPreserve,
     cairoFlush, cairoSetPoint, cairoGetPoint, cairoInvalidate,
@@ -94,22 +94,23 @@ import           Debug.Trace
 -- the debug messages that are selected are included in the compiled binary program.
 
 debugThisModule :: DebugTag
-debugThisModule  = mempty
+debugThisModule  = _textevt
 
 ------------------
 
 -- Debug function selection tags
-_mousevt, _keyevt, _animevt, _notanimevt, _drawevt, _winevt, _allevt, _ctxevt :: DebugTag
-_setup, _locks, _infra, _workers, _fulldebug, _allbutanim, _nonverbose :: DebugTag
-_miscA, _miscB, _exceptn :: DebugTag
+_mousevt, _keyevt, _animevt, _notanimevt, _drawevt, _textevt, _winevt, _allevt, _ctxevt,
+  _setup, _locks, _infra, _workers, _fulldebug, _allbutanim, _nonverbose,
+  _miscA, _miscB, _exceptn :: DebugTag
 
 _mousevt    = DebugTag 0x00000001 -- only mouse events
 _keyevt     = DebugTag 0x00000002 -- only key events
 _animevt    = DebugTag 0x00000004 -- only animation events
 _drawevt    = DebugTag 0x00000008 -- only redraw events
+_textevt    = DebugTag 0x00000010 -- only screen printer events
 _ctxevt     = DebugTag 0x00000100 -- only context switching events
 _winevt     = DebugTag 0x00000200 -- window manager related events
-_allevt     = _mousevt <> _keyevt <> _animevt <> _drawevt <> _winevt <> _ctxevt
+_allevt     = _mousevt <> _keyevt <> _animevt <> _drawevt <> _textevt <> _winevt <> _ctxevt
 _notanimevt = _exclude _animevt _allevt -- all events apart from animation events
 _locks      = DebugTag 0x00010000 -- MVar locking and unlocking  -- WARNING: extremely verbose!!!
 _infra      = DebugTag 0x00020000 -- the callback infrastructure -- WARNING: extremely verbose!!!
@@ -227,7 +228,6 @@ data CairoRenderMode
 data CairoRenderState
   = CairoRenderState
     { theCairoKeepWinSize        :: !PixSize
-    , theCairoFontExtents        :: !(Maybe Cairo.FontExtents)
     , theCanvasResizeMode        :: !CanvasMode
     , theCairoRenderMode         :: !CairoRenderMode
     , theCairoScreenPrinterState :: !ScreenPrinterState
@@ -238,9 +238,6 @@ cairoKeepWinSize = lens theCairoKeepWinSize $ \ a b -> a{ theCairoKeepWinSize = 
 
 --cairoRenderFontStyle :: Lens' CairoRenderState FontStyle
 --cairoRenderFontStyle = lens theCairoRenderFontStyle $ \ a b -> a{ theCairoRenderFontStyle = b }
-
-cairoFontExtents :: Lens' CairoRenderState (Maybe Cairo.FontExtents)
-cairoFontExtents = lens theCairoFontExtents $ \ a b -> a{ theCairoFontExtents = b }
 
 cairoRenderMode :: Lens' CairoRenderState CairoRenderMode
 cairoRenderMode = lens theCairoRenderMode $ \ a b -> a{ theCairoRenderMode = b }
@@ -590,7 +587,6 @@ createWin cfg = do
         , theGtkEventBox           = eventBox
         , theCairoRenderState      = CairoRenderState
             { theCairoKeepWinSize        = V2 0 0
-            , theCairoFontExtents        = Nothing
             , theCanvasResizeMode        = ClearCanvasMode
             , theCairoRenderMode         = VectorMode
             , theCairoScreenPrinterState = screenPrinterState
@@ -1105,19 +1101,9 @@ instance Happlet2DGraphics CairoRender where
 instance RenderText CairoRender where
   getRendererFontStyle = CairoRender $ use $ cairoScreenPrinterState . fontStyle
   setRendererFontStyle style' = do
-    logIO <- mkLogger "setRenderFontStyle"
     CairoRender $ do
-      let style = style' &~ do
-            fontSize %= max 6.0 . min 600.0
+      style <- lift $ cairoSetFontStyle style'
       cairoScreenPrinterState . fontStyle .= style
-      liftIO $ logIO _drawevt $ "setRendererFontStyle " ++ show style
-      ext <- lift $ do
-        Cairo.selectFontFace ("monospace" :: Strict.Text)
-          (if theFontItalic style then Cairo.FontSlantItalic else Cairo.FontSlantNormal )
-          (if theFontBold   style then Cairo.FontWeightBold  else Cairo.FontWeightNormal)
-        Cairo.setFontSize $ theFontSize style
-        Cairo.fontExtents
-      cairoFontExtents .= Just ext
       return style
 
   getGridCellSize = fmap realToFrac <$> getGridCellSizeDouble
@@ -1131,7 +1117,7 @@ instance RenderText CairoRender where
   gridLocationOfPoint = cairoGridLocationOfPoint . fmap realToFrac
   gridLocationToPoint (TextGridLocation (TextGridRow row) (TextGridColumn col)) = do
     fsiz <- CairoRender $ use $ cairoScreenPrinterState . fontStyle . fontSize
-    ext  <- cairoGetFontExtents
+    ext  <- CairoRender $ lift $ Cairo.fontExtents
     let fontHeight = max (Cairo.fontExtentsMaxYadvance ext) fsiz
     let fontWidth  = max (Cairo.fontExtentsMaxXadvance ext) (fontHeight / 2.0)
     let descent    = Cairo.fontExtentsDescent ext
@@ -1139,13 +1125,13 @@ instance RenderText CairoRender where
       (realToFrac col * fontWidth)
       ((fontHeight + descent) * realToFrac (row + 1) - descent + 0.5)
 
-  screenPrintNoAdvance st = cairoPrintNoAdvance True st . fst . spanPrintable
-  screenPrintCharNoAdvance st c =
-    if not (isPrint c) then return Nothing else cairoPrintNoAdvance True st (c:"")
+  screenPrintNoAdvance = cairoPrintNoAdvance True . fst . spanPrintable
+  screenPrintCharNoAdvance c =
+    if not (isPrint c) then return Nothing else cairoPrintNoAdvance True (c:"")
 
-  getStringBoundingBox st = cairoPrintNoAdvance False st . fst . spanPrintable
-  getCharBoundingBox st c =
-    if not (isPrint c) then return Nothing else cairoPrintNoAdvance False st (c:"")
+  getStringBoundingBox = cairoPrintNoAdvance False . fst . spanPrintable
+  getCharBoundingBox c =
+    if not (isPrint c) then return Nothing else cairoPrintNoAdvance False (c:"")
 
   saveScreenPrinterState = CairoRender . modifying cairoScreenPrinterState . const
   recallSavedScreenPrinterState = CairoRender $ use cairoScreenPrinterState
@@ -1154,44 +1140,55 @@ instance RenderText CairoRender where
 --cairoGetDPI :: Cairo.Render Double
 --cairoGetDPI = return 96.0
 
-cairoGetFontExtents :: CairoRender Cairo.FontExtents
-cairoGetFontExtents = do
-  ext <- CairoRender $ use cairoFontExtents
-  case ext of
-    Just ext -> return ext
-    Nothing  -> do
-      setRendererFontStyle defaultFontStyle
-      CairoRender $ do
-        ext <- lift $ Cairo.fontExtents
-        cairoFontExtents .= Just ext
-        return ext
+-- | Set a 'Happlets.Draw.Text.FontStyle' in the current 'Cairo.Render' context.
+cairoSetFontStyle :: FontStyle -> Cairo.Render FontStyle
+cairoSetFontStyle style' = do
+  let style = style' & fontSize %~ max 6.0 . min 600.0
+  Cairo.selectFontFace ("monospace" :: Strict.Text)
+    (if theFontItalic style then Cairo.FontSlantItalic else Cairo.FontSlantNormal )
+    (if theFontBold   style then Cairo.FontWeightBold  else Cairo.FontWeightNormal)
+  Cairo.setFontSize $ theFontSize style
+  return style
 
 -- not for export
 -- This does NOT evaluate 'spanPrintable' so it must not be exported.
-cairoPrintNoAdvance :: Bool -> ScreenPrinterState -> String -> CairoRender (Maybe TextBoundingBox)
-cairoPrintNoAdvance doDisplay st str = do
+cairoPrintNoAdvance :: Bool -> String -> CairoRender (Maybe TextBoundingBox)
+cairoPrintNoAdvance doDisplay str = do
+  logIO <- mkLogger "cairoPrintNoAdvance"
+  st <- CairoRender $ use cairoScreenPrinterState
   let style = theFontStyle st
   let (TextGridLocation (TextGridRow row) (TextGridColumn col)) = theTextCursor st
   (V2 gridW gridH) <- getGridCellSizeDouble
   (V2  offX  offY) <- gridLocationToPoint $ theTextCursor st
   cairoRender $ do
+    cairoSetFontStyle style
+    liftIO $ logIO _textevt $ "setRendererFontStyle " ++ show style
     ext <- Cairo.textExtents str
     let size = V2 (Cairo.textExtentsXbearing ext) (Cairo.textExtentsYbearing ext)
     let pt   = V2 (realToFrac col * gridW + 0.5) (realToFrac row * gridH + 0.5)
     let rect = Rect2D pt (pt + size)
+    liftIO $ logIO _textevt $ "Cairo.textExtents -> " ++ show size ++ ", cursor=" ++ show pt
     when doDisplay $ do
+      liftIO $ logIO _textevt $ "cairoDrawRect "
+        ++ show (theFontBackColor style)
+        ++ ' ' : show ((RealApprox <$> rect) ^. rect2DPoints) ++ " -- background"
       cairoDrawRect (theFontBackColor style) 0 (theFontBackColor style) (RealApprox <$> rect)
+      liftIO $ logIO _textevt $ "moveTo "
+        ++ show offX       ++ ' ':show offY
+        ++ " setColor "    ++ show (theFontForeColor style)
+        ++ " setFontSize " ++ show (theFontSize      style)
       Cairo.moveTo offX offY
       cairoSetColor $ theFontForeColor style
       Cairo.setFontSize $ theFontSize style
+      liftIO $ logIO _textevt $ "Cairo.showText "++show str
       Cairo.showText str
       Cairo.fill
     return $ Just rect
 
 withCairoFontExtents :: (Double -> Double -> Double -> a) -> CairoRender a
 withCairoFontExtents f = do
-  fsiz  <- CairoRender $ use $ cairoScreenPrinterState . fontStyle . fontSize
-  ext <- cairoGetFontExtents
+  (fsiz, ext) <- CairoRender $
+    (,) <$> use (cairoScreenPrinterState . fontStyle . fontSize) <*> lift Cairo.fontExtents
   let fontHeight = max (Cairo.fontExtentsMaxYadvance ext) fsiz
   let fontWidth  = max (Cairo.fontExtentsMaxXadvance ext) (fontHeight / 2.0)
   let descent    = Cairo.fontExtentsDescent ext
