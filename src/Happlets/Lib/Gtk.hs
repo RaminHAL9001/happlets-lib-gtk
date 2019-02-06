@@ -1115,15 +1115,10 @@ instance RenderText CairoRender where
       (TextGridColumn $ ceiling $ realToFrac winW / txtW)
     
   gridLocationOfPoint = cairoGridLocationOfPoint . fmap realToFrac
-  gridLocationToPoint (TextGridLocation (TextGridRow row) (TextGridColumn col)) = do
-    fsiz <- CairoRender $ use $ cairoScreenPrinterState . fontStyle . fontSize
-    ext  <- CairoRender $ lift $ Cairo.fontExtents
-    let fontHeight = max (Cairo.fontExtentsMaxYadvance ext) fsiz
-    let fontWidth  = max (Cairo.fontExtentsMaxXadvance ext) (fontHeight / 2.0)
-    let descent    = Cairo.fontExtentsDescent ext
-    return $ V2
-      (realToFrac col * fontWidth)
-      ((fontHeight + descent) * realToFrac (row + 1) - descent + 0.5)
+  gridLocationToPoint (TextGridLocation (TextGridRow row) (TextGridColumn col)) =
+    withCairoFontExtents $ \ fontWidth fontHeight ascent _descent -> V2
+      (realToFrac col * fontWidth + 1.5)
+      (fontHeight * realToFrac row + ascent + 0.5)
 
   screenPrintNoAdvance = cairoPrintNoAdvance True . fst . spanPrintable
   screenPrintCharNoAdvance c =
@@ -1133,8 +1128,12 @@ instance RenderText CairoRender where
   getCharBoundingBox c =
     if not (isPrint c) then return Nothing else cairoPrintNoAdvance False (c:"")
 
-  saveScreenPrinterState = CairoRender . modifying cairoScreenPrinterState . const
-  recallSavedScreenPrinterState = CairoRender $ use cairoScreenPrinterState
+  getScreenPrinterState = CairoRender $ use cairoScreenPrinterState
+  setScreenPrinterState st = CairoRender $ do
+    cairoScreenPrinterState .= st
+    logIO <- mkLogger "saveScreenPrinterState"
+    let (TextGridLocation (TextGridRow row) (TextGridColumn col)) = st ^. textCursor
+    liftIO $ logIO _textevt $ "row="++show row++", col="++show col
 
 ---- | TODO: obtain this value from Gtk, Glib, or Cairo.
 --cairoGetDPI :: Cairo.Render Double
@@ -1143,15 +1142,17 @@ instance RenderText CairoRender where
 -- | Set a 'Happlets.Draw.Text.FontStyle' in the current 'Cairo.Render' context.
 cairoSetFontStyle :: FontStyle -> Cairo.Render FontStyle
 cairoSetFontStyle style' = do
+  logIO <- mkLogger "cairoSetFontStyle"
   let style = style' & fontSize %~ max 6.0 . min 600.0
   Cairo.selectFontFace ("monospace" :: Strict.Text)
     (if theFontItalic style then Cairo.FontSlantItalic else Cairo.FontSlantNormal )
     (if theFontBold   style then Cairo.FontWeightBold  else Cairo.FontWeightNormal)
+  liftIO $ logIO _textevt $ "Cairo.setFontSize "++show (theFontSize style)
   Cairo.setFontSize $ theFontSize style
   return style
 
 -- not for export
--- This does NOT evaluate 'spanPrintable' so it must not be exported.
+-- This does NOT evaluate 'spanPrintable' on the input 'String' so it must not be exported.
 cairoPrintNoAdvance :: Bool -> String -> CairoRender (Maybe TextBoundingBox)
 cairoPrintNoAdvance doDisplay str = do
   logIO <- mkLogger "cairoPrintNoAdvance"
@@ -1160,12 +1161,20 @@ cairoPrintNoAdvance doDisplay str = do
   let (TextGridLocation (TextGridRow row) (TextGridColumn col)) = theTextCursor st
   (V2 gridW gridH) <- getGridCellSizeDouble
   (V2  offX  offY) <- gridLocationToPoint $ theTextCursor st
+  liftIO $ logIO _textevt
+    $ "cursor: row="++show row++", col="++show col
+    ++", gridW="++show gridW++", gridH="++show gridH
+    ++", offX="++show offX++", offY="++show offY
   cairoRender $ do
     cairoSetFontStyle style
-    liftIO $ logIO _textevt $ "setRendererFontStyle " ++ show style
     ext <- Cairo.textExtents str
-    let size = V2 (Cairo.textExtentsXbearing ext) (Cairo.textExtentsYbearing ext)
-    let pt   = V2 (realToFrac col * gridW + 0.5) (realToFrac row * gridH + 0.5)
+    liftIO $ logIO _textevt $ "Xadvance="++show (Cairo.textExtentsXadvance ext)++
+      ", Yadvance="++show (Cairo.textExtentsYadvance ext)++
+      ", Ybearing="++show (Cairo.textExtentsYbearing ext)++
+      ", textWidth="++show (Cairo.textExtentsWidth ext)++
+      ", textHeight="++show (Cairo.textExtentsHeight ext)
+    let size = V2 (Cairo.textExtentsXadvance ext + 2.0) gridH
+    let pt   = V2 (realToFrac col * gridW) (realToFrac row * gridH)
     let rect = Rect2D pt (pt + size)
     liftIO $ logIO _textevt $ "Cairo.textExtents -> " ++ show size ++ ", cursor=" ++ show pt
     when doDisplay $ do
@@ -1185,23 +1194,27 @@ cairoPrintNoAdvance doDisplay str = do
       Cairo.fill
     return $ Just rect
 
-withCairoFontExtents :: (Double -> Double -> Double -> a) -> CairoRender a
+withCairoFontExtents :: (Double -> Double -> Double -> Double -> a) -> CairoRender a
 withCairoFontExtents f = do
-  (fsiz, ext) <- CairoRender $
-    (,) <$> use (cairoScreenPrinterState . fontStyle . fontSize) <*> lift Cairo.fontExtents
-  let fontHeight = max (Cairo.fontExtentsMaxYadvance ext) fsiz
-  let fontWidth  = max (Cairo.fontExtentsMaxXadvance ext) (fontHeight / 2.0)
+  logIO <- mkLogger "withCarioFontExtents"
+  ext <- CairoRender $ lift Cairo.fontExtents
+  let ascent     = Cairo.fontExtentsAscent  ext
   let descent    = Cairo.fontExtentsDescent ext
-  return $ f fontHeight fontWidth descent
+  let fontHeight = ascent + 2.0 * descent
+  let fontWidth  = Cairo.fontExtentsMaxXadvance ext
+  liftIO $ logIO _textevt $
+    "fontHeight="++show fontHeight++", fontWidth="++show fontWidth++
+    ", ascent="++show ascent++", descent="++show descent
+  return $ f fontWidth fontHeight ascent descent
 
 getGridCellSizeDouble :: CairoRender (Size2D Double)
-getGridCellSizeDouble = withCairoFontExtents $ \ fontHeight fontWidth descent -> 
-  V2 fontWidth (fontHeight + descent)
+getGridCellSizeDouble = withCairoFontExtents $ \ fontWidth fontHeight _ascent _descent -> 
+  V2 fontWidth fontHeight
 
 cairoGridLocationOfPoint :: Point2D Double -> CairoRender TextGridLocation
 cairoGridLocationOfPoint (V2 x y) =
-  withCairoFontExtents $ \ fontHeight fontWidth descent -> TextGridLocation
-    (TextGridRow    $ floor $ y / (fontHeight + descent))
+  withCairoFontExtents $ \ fontWidth fontHeight _ascent _descent -> TextGridLocation
+    (TextGridRow    $ floor $ y / fontHeight)
     (TextGridColumn $ floor $ x / fontWidth)
 
 cairoArray :: (Int -> Int -> Cairo.SurfaceData Int Word32 -> IO a) -> Cairo.Render a

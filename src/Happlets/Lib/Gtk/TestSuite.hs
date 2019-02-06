@@ -4,6 +4,7 @@ import           Happlets.Lib.Gtk
 
 import           Control.Concurrent.MVar
 
+import           Data.Maybe
 --import           Data.Semigroup
 import qualified Data.Text as Strict
 
@@ -36,7 +37,7 @@ main = happlet gtkHapplet $ do
     , thePulseCircleColor      = blue
     }
 
-  redgrid     <- newHapplet (RedGrid 64.0 Nothing)
+  redgrid     <- newHapplet (RedGrid 64.0 Nothing Nothing)
 
   let testSuite = TestSuite
         { testSuiteSharedState = mvar
@@ -52,14 +53,18 @@ data RedGrid
   = RedGrid
     { theRedGridScale :: RealApprox
     , theLastMouse    :: Maybe PixCoord
+    , theMouseBox     :: Maybe TextBoundingBox
     }
-  deriving (Eq, Ord, Show, Read)
+  deriving Eq
 
 lastMouse :: Lens' RedGrid (Maybe PixCoord)
 lastMouse = lens theLastMouse $ \ a b -> a{ theLastMouse = b }
 
 redGridScale :: Lens' RedGrid RealApprox
 redGridScale = lens theRedGridScale $ \ a b -> a{ theRedGridScale = b }
+
+mouseBox :: Lens' RedGrid (Maybe TextBoundingBox)
+mouseBox = lens theMouseBox $ \ a b -> a{ theMouseBox = b }
 
 redGridDraw :: RealApprox -> PixSize -> CairoRender ()
 redGridDraw scale winsize = do
@@ -73,10 +78,11 @@ redGridDraw scale winsize = do
     clearScreen (black & alphaChannel .~ 0.9)
     forM_ (around w centerX) $ drawLine red 1.0 . mkLine V2 h
     forM_ (around h centerY) $ drawLine red 1.0 . mkLine (flip V2) w
-    void $ screenPrinter $ do
-      gridRow    .= 0
-      gridColumn .= 0
-      displayString $ "Grid square size = " ++ show scale
+    void $ screenPrinter $
+      withFontStyle (do{ fontForeColor .= white; fontSize .= 16.0; }) $ do
+        gridRow    .= 0
+        gridColumn .= 0
+        displayString $ "Grid square size = " ++ show scale
 
 redGridGUI :: TestSuite -> PixSize -> GtkGUI RedGrid ()
 redGridGUI ctx _size = do
@@ -86,34 +92,39 @@ redGridGUI ctx _size = do
     putStrLn "change away from Red Grid"
     void $ swapMVar mvar "Red Grid"
   resizeEvents ClearCanvasMode $ \ _oldsize newsize -> cancelIfBusy >> draw newsize
-  mouseEvents MouseAll $ \ mouse@(Mouse _ down _ button pt1@(V2 x y)) -> do
-    when down $ case button of
-      RightClick -> switchToPulseCircle ctx
-      LeftClick  -> do
-        scale <- use redGridScale
-        redGridScale .= if scale <= 4.0 then 64.0 else scale / 2.0
-        getWindowSize >>= draw
-      _          -> return ()
+  mouseEvents MouseAll $ \ (Mouse _ down _ button pt1@(V2 x1 y1)) -> do
     use lastMouse >>= \ case
-      Nothing       -> return ()
-      Just (V2 x y) -> refreshRegion
-        [ rect2D & rect2DHead .~ V2 (x - 22) (y - 22) & rect2DTail .~ V2 (x + 22) (y + 22) ]
-    lastMouse .= Just pt1
-    cancelIfBusy
-    onCanvas $ screenPrinter $ withFontStyle (do{ fontForeColor .= white; fontSize .= 16.0; }) $ do
-      gridRow    .= 1
-      gridColumn .= 0
-      displayString $ show mouse
-      --cairoRender $ do
-      --  cameFrom <- liftIO $ readMVar mvar
-      --  Cairo.moveTo  5.0  10.0
-      --  Cairo.setSourceRGBA  1.0  1.0  1.0  1.0
-      --  Cairo.showText $ "came from " <> cameFrom
+      Nothing         -> return ()
+      Just (V2 x0 y0) -> refreshRegion
+        [rect2D & rect2DHead .~ V2 (x0 - 22) (y0 - 22) & rect2DTail .~ V2 (x0 + 22) (y0 + 22)]
+    if down
+     then do
+      case button of
+        RightClick -> switchToPulseCircle ctx
+        LeftClick  -> do
+          scale <- use redGridScale
+          redGridScale .= if scale <= 4.0 then 64.0 else scale / 2.0
+          getWindowSize >>= draw
+        _          -> return ()
+      mb <- use mouseBox
+      refreshRegion $ fmap ((sampCoord :: Int -> SampCoord) . floor) <$> maybeToList mb
+      mb <- onOSBuffer $ screenPrinter $
+        withFontStyle (do{ fontForeColor .= white; fontSize .= 32.0; }) $ do
+          gridRow    .= 1
+          gridColumn .= 0
+          displayString $ show pt1
+      mouseBox .= mb
+     else use mouseBox >>= \ case
+      Nothing  -> return ()
+      Just box -> do
+        refreshRegion [(sampCoord :: Int -> SampCoord) . floor <$> box]
+        mouseBox .= Nothing
     onOSBuffer $ cairoRender $ do
-      Cairo.setLineWidth (3.0)
-      Cairo.arc (realToFrac x) (realToFrac y) (20.0) (0.0) (2*pi)
-      cairoSetColor lime
+      Cairo.setLineWidth 2.0
+      cairoSetColor chartreuse
+      Cairo.arc (realToFrac x1 + 0.5) (realToFrac y1 + 0.5) 20.0 0 (2*pi)
       Cairo.stroke
+    lastMouse .= Just pt1
   getWindowSize >>= draw
 
 ----------------------------------------------------------------------------------------------------
