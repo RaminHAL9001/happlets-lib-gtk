@@ -13,7 +13,7 @@ module Happlets.Lib.Gtk
     -- function, but using point, line, and color values specified in the "Happlets.Draw"
     -- sub-modules.
     CairoRender, cairoRender, GtkCairoDiagram, gtkCairoDiagram,
-    cairoClearCanvas, cairoSetFontStyle, cairoSetColor, cairoGridLocationOfPoint,
+    cairoClearCanvas, cairoSetColor, cairoGridLocationOfPoint,
     cairoDrawPath, cairoMoveTo, cairoLineTo, cairoDrawLine,
     cairoDrawRect, cairoPreserve,
     cairoFlush, cairoSetPoint, cairoGetPoint, cairoInvalidate,
@@ -94,7 +94,7 @@ import           Debug.Trace
 -- the debug messages that are selected are included in the compiled binary program.
 
 debugThisModule :: DebugTag
-debugThisModule  = _textevt
+debugThisModule  = mempty
 
 ------------------
 
@@ -257,7 +257,11 @@ cairoRender = CairoRender . lift
 -- | Extract a @"Graphics.Rendering.Cairo".'Cairo.Render'@ from a 'CairoRender' function type.
 runCairoRender
   :: PixSize -> CairoRenderState -> CairoRender a -> Cairo.Render (a, CairoRenderState)
-runCairoRender winsize rendst (CairoRender f) = runStateT f (rendst & cairoKeepWinSize .~ winsize)
+runCairoRender winsize rendst (CairoRender render) =
+  flip runStateT (rendst & cairoKeepWinSize .~ winsize) $ do
+    style <- use $ cairoScreenPrinterState . fontStyle
+    lift $ cairoSetFontStyle True style style
+    render
 
 -- | Switch to vector mode (only if it isn't already) which marks the surface as "dirty" in the
 -- smallest possible rectangle containing all points. This function is called before every vector
@@ -1100,11 +1104,11 @@ instance Happlet2DGraphics CairoRender where
 
 instance RenderText CairoRender where
   getRendererFontStyle = CairoRender $ use $ cairoScreenPrinterState . fontStyle
-  setRendererFontStyle style' = do
-    CairoRender $ do
-      style <- lift $ cairoSetFontStyle style'
-      cairoScreenPrinterState . fontStyle .= style
-      return style
+  setRendererFontStyle newStyle = CairoRender $ do
+    oldStyle <- use $ cairoScreenPrinterState . fontStyle
+    newStyle <- lift $ cairoSetFontStyle False oldStyle newStyle
+    cairoScreenPrinterState . fontStyle .= newStyle
+    return newStyle
 
   getGridCellSize = fmap realToFrac <$> getGridCellSizeDouble
   getWindowTextGridSize = do
@@ -1140,16 +1144,26 @@ instance RenderText CairoRender where
 --cairoGetDPI = return 96.0
 
 -- | Set a 'Happlets.Draw.Text.FontStyle' in the current 'Cairo.Render' context.
-cairoSetFontStyle :: FontStyle -> Cairo.Render FontStyle
-cairoSetFontStyle style' = do
+cairoSetFontStyle :: Bool -> FontStyle -> FontStyle -> Cairo.Render FontStyle
+cairoSetFontStyle force oldStyle newStyle0 = do
   logIO <- mkLogger "cairoSetFontStyle"
-  let style = style' & fontSize %~ max 6.0 . min 600.0
-  Cairo.selectFontFace ("monospace" :: Strict.Text)
-    (if theFontItalic style then Cairo.FontSlantItalic else Cairo.FontSlantNormal )
-    (if theFontBold   style then Cairo.FontWeightBold  else Cairo.FontWeightNormal)
-  liftIO $ logIO _textevt $ "Cairo.setFontSize "++show (theFontSize style)
-  Cairo.setFontSize $ theFontSize style
-  return style
+  let newStyle = newStyle0 & fontSize %~ max 6.0 . min 600.0
+  let changed getter = force || getter oldStyle /= getter newStyle
+  if changed theFontSize || changed theFontBold || changed theFontItalic
+   then do
+    when (changed theFontBold || changed theFontItalic) $ do
+      liftIO $ logIO _textevt $ "Cairo.selectFontFace \"monospace\" " ++
+        (if theFontItalic newStyle then "(italic)" else "(not italic)") ++
+        (if theFontBold   newStyle then "(bold)"   else "(not bold)")
+      Cairo.selectFontFace ("monospace" :: Strict.Text)
+        (if theFontItalic newStyle then Cairo.FontSlantItalic else Cairo.FontSlantNormal )
+        (if theFontBold   newStyle then Cairo.FontWeightBold  else Cairo.FontWeightNormal)
+    when (changed theFontSize) $ do
+      liftIO $ logIO _textevt $ "Cairo.setFontSize "++show (theFontSize newStyle)
+      Cairo.setFontSize $ theFontSize newStyle
+   else liftIO $ logIO _textevt
+          "-- fontSize, fontItalic, fontBold, values are all the same as before"
+  return newStyle
 
 -- not for export
 -- This does NOT evaluate 'spanPrintable' on the input 'String' so it must not be exported.
@@ -1166,7 +1180,6 @@ cairoPrintNoAdvance doDisplay str = do
     ++", gridW="++show gridW++", gridH="++show gridH
     ++", offX="++show offX++", offY="++show offY
   cairoRender $ do
-    cairoSetFontStyle style
     ext <- Cairo.textExtents str
     liftIO $ logIO _textevt $ "Xadvance="++show (Cairo.textExtentsXadvance ext)++
       ", Yadvance="++show (Cairo.textExtentsYadvance ext)++
@@ -1188,7 +1201,6 @@ cairoPrintNoAdvance doDisplay str = do
         ++ " setFontSize " ++ show (theFontSize      style)
       Cairo.moveTo offX offY
       cairoSetColor $ theFontForeColor style
-      Cairo.setFontSize $ theFontSize style
       liftIO $ logIO _textevt $ "Cairo.showText "++show str
       Cairo.showText str
       Cairo.fill
@@ -1200,7 +1212,7 @@ withCairoFontExtents f = do
   ext <- CairoRender $ lift Cairo.fontExtents
   let ascent     = Cairo.fontExtentsAscent  ext
   let descent    = Cairo.fontExtentsDescent ext
-  let fontHeight = ascent + 2.0 * descent
+  let fontHeight = ascent + descent
   let fontWidth  = Cairo.fontExtentsMaxXadvance ext
   liftIO $ logIO _textevt $
     "fontHeight="++show fontHeight++", fontWidth="++show fontWidth++

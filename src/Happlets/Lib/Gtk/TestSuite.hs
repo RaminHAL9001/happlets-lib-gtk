@@ -68,16 +68,14 @@ mouseBox = lens theMouseBox $ \ a b -> a{ theMouseBox = b }
 
 redGridDraw :: RealApprox -> PixSize -> CairoRender ()
 redGridDraw scale winsize = do
-  let size@(V2 w h) = realToFrac <$> winsize
+  let (V2 w h) = realToFrac <$> winsize
   if scale <= 1 then clearScreen red else do
-    let (V2 centerX centerY) = (/ 2.0) <$> size
-    let around top center =
-          (takeWhile (>=  0) $ [1 ..] >>= \ i -> [center - scale * i :: RealApprox]) ++
-          (takeWhile (< top) $ [0 ..] >>= \ i -> [center + scale * i :: RealApprox])
     let mkLine v2 top i = Line2D (v2 i 0) (v2 i top)
     clearScreen (black & alphaChannel .~ 0.9)
-    forM_ (around w centerX) $ drawLine red 1.0 . mkLine V2 h
-    forM_ (around h centerY) $ drawLine red 1.0 . mkLine (flip V2) w
+    forM_ [0::Int .. floor (w / scale)] $
+      drawLine red 1.0 . mkLine V2 h . (+ 0.5) . (* scale) . realToFrac
+    forM_ [0::Int .. floor (h / scale)] $
+      drawLine red 1.0 . mkLine (flip V2) w . (+ 0.5) . (* scale) . realToFrac
     void $ screenPrinter $
       withFontStyle (do{ fontForeColor .= white; fontSize .= 16.0; }) $ do
         gridRow    .= 0
@@ -91,7 +89,7 @@ redGridGUI ctx _size = do
   changeEvents $ liftIO $ do
     putStrLn "change away from Red Grid"
     void $ swapMVar mvar "Red Grid"
-  resizeEvents ClearCanvasMode $ \ _oldsize newsize -> cancelIfBusy >> draw newsize
+  resizeEvents CopyCanvasMode $ \ _oldsize newsize -> cancelIfBusy >> draw newsize
   mouseEvents MouseAll $ \ (Mouse _ down _ button pt1@(V2 x1 y1)) -> do
     use lastMouse >>= \ case
       Nothing         -> return ()
@@ -102,16 +100,16 @@ redGridGUI ctx _size = do
       case button of
         RightClick -> switchToPulseCircle ctx
         LeftClick  -> do
-          scale <- use redGridScale
-          redGridScale .= if scale <= 4.0 then 64.0 else scale / 2.0
+          redGridScale %= \ scale -> if scale <= 4.0 then 64.0 else scale / 2.0
           getWindowSize >>= draw
         _          -> return ()
-      mb <- use mouseBox
+      (RealApprox scale) <- use redGridScale
+      mb    <- use mouseBox
       refreshRegion $ fmap ((sampCoord :: Int -> SampCoord) . floor) <$> maybeToList mb
       mb <- onOSBuffer $ screenPrinter $
-        withFontStyle (do{ fontForeColor .= white; fontSize .= 32.0; }) $ do
-          gridRow    .= 1
-          gridColumn .= 0
+        withFontStyle (do{ fontForeColor .= white; fontSize .= scale; }) $ do
+          gridRow    .= 2
+          gridColumn .= 4
           displayString $ show pt1
       mouseBox .= mb
      else use mouseBox >>= \ case
