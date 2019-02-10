@@ -1119,8 +1119,9 @@ instance RenderText CairoRender where
       (TextGridColumn $ ceiling $ realToFrac winW / txtW)
     
   gridLocationOfPoint = cairoGridLocationOfPoint . fmap realToFrac
-  gridLocationToPoint (TextGridLocation (TextGridRow row) (TextGridColumn col)) =
-    withCairoFontExtents $ \ fontWidth fontHeight ascent _descent -> V2
+  gridLocationToPoint (TextGridLocation (TextGridRow row) (TextGridColumn col)) = do
+    off <- CairoRender $ use $ cairoScreenPrinterState . renderOffset
+    withCairoFontExtents $ \ fontWidth fontHeight ascent _descent -> off + V2
       (realToFrac col * fontWidth + 1.5)
       (fontHeight * realToFrac row + ascent + 0.5)
 
@@ -1174,11 +1175,11 @@ cairoPrintNoAdvance doDisplay str = do
   let style = theFontStyle st
   let (TextGridLocation (TextGridRow row) (TextGridColumn col)) = theTextCursor st
   (V2 gridW gridH) <- getGridCellSizeDouble
-  (V2  offX  offY) <- gridLocationToPoint $ theTextCursor st
+  (V2 gridX gridY) <- gridLocationToPoint $ theTextCursor st
   liftIO $ logIO _textevt
     $ "cursor: row="++show row++", col="++show col
     ++", gridW="++show gridW++", gridH="++show gridH
-    ++", offX="++show offX++", offY="++show offY
+    ++", gridX="++show gridX++", gridY="++show gridY
   cairoRender $ do
     ext <- Cairo.textExtents str
     liftIO $ logIO _textevt $ "Xadvance="++show (Cairo.textExtentsXadvance ext)++
@@ -1186,8 +1187,8 @@ cairoPrintNoAdvance doDisplay str = do
       ", Ybearing="++show (Cairo.textExtentsYbearing ext)++
       ", textWidth="++show (Cairo.textExtentsWidth ext)++
       ", textHeight="++show (Cairo.textExtentsHeight ext)
+    let pt   = V2 (realToFrac col * gridW) (realToFrac row * gridH) + theRenderOffset st
     let size = V2 (Cairo.textExtentsXadvance ext + 2.0) gridH
-    let pt   = V2 (realToFrac col * gridW) (realToFrac row * gridH)
     let rect = Rect2D pt (pt + size)
     liftIO $ logIO _textevt $ "Cairo.textExtents -> " ++ show size ++ ", cursor=" ++ show pt
     when doDisplay $ do
@@ -1196,10 +1197,10 @@ cairoPrintNoAdvance doDisplay str = do
         ++ ' ' : show ((RealApprox <$> rect) ^. rect2DPoints) ++ " -- background"
       cairoDrawRect (theFontBackColor style) 0 (theFontBackColor style) (RealApprox <$> rect)
       liftIO $ logIO _textevt $ "moveTo "
-        ++ show offX       ++ ' ':show offY
+        ++ show gridX       ++ ' ':show gridY
         ++ " setColor "    ++ show (theFontForeColor style)
         ++ " setFontSize " ++ show (theFontSize      style)
-      Cairo.moveTo offX offY
+      Cairo.moveTo gridX gridY
       cairoSetColor $ theFontForeColor style
       liftIO $ logIO _textevt $ "Cairo.showText "++show str
       Cairo.showText str
@@ -1224,7 +1225,9 @@ getGridCellSizeDouble = withCairoFontExtents $ \ fontWidth fontHeight _ascent _d
   V2 fontWidth fontHeight
 
 cairoGridLocationOfPoint :: Point2D Double -> CairoRender TextGridLocation
-cairoGridLocationOfPoint (V2 x y) =
+cairoGridLocationOfPoint pt = do
+  off <- CairoRender $ use $ cairoScreenPrinterState . renderOffset
+  let (V2 x y) = pt - off
   withCairoFontExtents $ \ fontWidth fontHeight _ascent _descent -> TextGridLocation
     (TextGridRow    $ floor $ y / fontHeight)
     (TextGridColumn $ floor $ x / fontWidth)

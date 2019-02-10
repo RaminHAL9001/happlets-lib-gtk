@@ -78,8 +78,9 @@ redGridDraw scale winsize = do
       drawLine red 1.0 . mkLine (flip V2) w . (+ 0.5) . (* scale) . realToFrac
     void $ screenPrinter $
       withFontStyle (do{ fontForeColor .= white; fontSize .= 16.0; }) $ do
-        gridRow    .= 0
-        gridColumn .= 0
+        renderOffset .= V2 0 0
+        gridRow      .= 0
+        gridColumn   .= 0
         displayString $ "Grid square size = " ++ show scale
 
 redGridGUI :: TestSuite -> PixSize -> GtkGUI RedGrid ()
@@ -104,12 +105,13 @@ redGridGUI ctx _size = do
           getWindowSize >>= draw
         _          -> return ()
       (RealApprox scale) <- use redGridScale
-      mb    <- use mouseBox
+      mb <- use mouseBox
       refreshRegion $ fmap ((sampCoord :: Int -> SampCoord) . floor) <$> maybeToList mb
       mb <- onOSBuffer $ screenPrinter $
         withFontStyle (do{ fontForeColor .= white; fontSize .= scale; }) $ do
-          gridRow    .= 2
-          gridColumn .= 4
+          gridRow      .= (-1)
+          gridColumn   .= (-10)
+          renderOffset .= (realToFrac <$> pt1)
           displayString $ show pt1
       mouseBox .= mb
      else use mouseBox >>= \ case
