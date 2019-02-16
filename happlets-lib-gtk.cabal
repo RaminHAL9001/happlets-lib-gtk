@@ -96,6 +96,7 @@ Library {
     Happlets.Lib.Gtk
 
   BUILD-DEPENDS:
+    alsa-pcm             >=0.5      && <0.7.0,
     array                >0.5.0.0   && <0.6.0.0,
     cairo                >=0.13.3.0 && <0.14.0.0,
     containers           >=0.5.5.0  && <=0.6.0.0,
@@ -109,6 +110,7 @@ Library {
     linear               >=1.20.0   && <2.0.0.0,
     mtl                  >=2.2.0    && <=2.2.2,
     pango                >=0.13.4.0 && <0.14.0.0,
+    sample-frame         >=0.0.3    && <1.0.0,
     semigroups           >=0.16.0   && <0.19.0,
     text                 >=1.1.1.4  && <=2.0.0.0,
     time                 >=1.4.0.0  && <=1.9.1,
@@ -147,6 +149,7 @@ Test-suite happlets-lib-gtk-test {
     Happlets.Lib.Gtk
 
   BUILD-DEPENDS:
+    alsa-pcm             >=0.5      && <0.7.0,
     array                >0.5.0.0   && <0.6.0.0,
     cairo                >=0.13.3.0 && <0.14.0.0,
     containers           >=0.5.5.0  && <=0.6.0.0,
@@ -159,6 +162,7 @@ Test-suite happlets-lib-gtk-test {
     lens                 >=4.0.0.0  && <5.0.0.0,
     linear               >=1.20.0   && <2.0.0.0,
     mtl                  >=2.2.0    && <=2.2.2,
+    sample-frame         >=0.0.3    && <1.0.0,
     semigroups           >=0.16.0   && <0.19.0,
     text                 >=1.1.1.4  && <=2.0.0.0,
     time                 >=1.4.0.0  && <=1.9.1,

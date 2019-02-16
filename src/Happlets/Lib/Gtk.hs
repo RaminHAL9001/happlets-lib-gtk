@@ -31,6 +31,7 @@ module Happlets.Lib.Gtk
 ----------------------------------------------------------------------------------------------------
 
 import           Happlets
+import           Happlets.Audio
 import           Happlets.Draw
 import           Happlets.Provider
 
@@ -47,6 +48,8 @@ import           Data.Semigroup
 import qualified Data.Text         as Strict
 import           Data.Time.Clock
 import           Data.Word
+
+import           Foreign.Storable
 
 import qualified Graphics.Rendering.Cairo           as Cairo
 
@@ -67,6 +70,9 @@ import qualified Graphics.UI.Gtk.Windows.Window     as Gtk
 import qualified Graphics.UI.Gtk.Gdk.GC             as Gtk
 import qualified Graphics.UI.Gtk.Gdk.Pixmap         as Gtk
 #endif
+
+import qualified Sound.ALSA.PCM     as Linux
+import qualified Sound.Frame.Stereo as Stereo
 
 import           Diagrams.Backend.Cairo.Internal
 import           Diagrams.BoundingBox
@@ -99,19 +105,21 @@ debugThisModule  = mempty
 ------------------
 
 -- Debug function selection tags
-_mousevt, _keyevt, _animevt, _notanimevt, _drawevt, _textevt, _winevt, _allevt, _ctxevt,
+_mousevt, _keyevt, _animevt, _notanimevt, _drawevt, _audioevt, _textevt, _winevt, _ctxevt,
   _setup, _locks, _infra, _workers, _fulldebug, _allbutanim, _nonverbose,
-  _miscA, _miscB, _exceptn :: DebugTag
+  _miscA, _miscB, _exceptn, _allevt :: DebugTag
 
 _mousevt    = DebugTag 0x00000001 -- only mouse events
 _keyevt     = DebugTag 0x00000002 -- only key events
 _animevt    = DebugTag 0x00000004 -- only animation events
 _drawevt    = DebugTag 0x00000008 -- only redraw events
 _textevt    = DebugTag 0x00000010 -- only screen printer events
+_audioevt   = DebugTag 0x00000020 -- only audio events
 _ctxevt     = DebugTag 0x00000100 -- only context switching events
 _winevt     = DebugTag 0x00000200 -- window manager related events
-_allevt     = _mousevt <> _keyevt <> _animevt <> _drawevt <> _textevt <> _winevt <> _ctxevt
-_notanimevt = _exclude _animevt _allevt -- all events apart from animation events
+_allevt     = _mousevt <> _keyevt <> _animevt <> _drawevt <> _audioevt <>
+              _textevt <> _winevt <> _ctxevt
+_notanimevt = _exclude _animevt _allevt -- all events but animation/audio events
 _locks      = DebugTag 0x00010000 -- MVar locking and unlocking  -- WARNING: extremely verbose!!!
 _infra      = DebugTag 0x00020000 -- the callback infrastructure -- WARNING: extremely verbose!!!
 _setup      = DebugTag 0x00040000
@@ -276,7 +284,7 @@ vectorMode = CairoRender $ use cairoRenderMode >>= \ case
       Cairo.surfaceMarkDirtyRectangle surface loX loY (hiX - loX + 1) (hiY - loY + 1)
     cairoRenderMode .= VectorMode
 
--- | Switch to raster mode (only if it isn't already) which flushs all pending vector events. This
+-- | Switch to raster mode (only if it isn't already) which flushes all pending vector events. This
 -- function is called before every raster operation.
 rasterMode :: Double -> Double -> CairoRender ()
 rasterMode x y = CairoRender $ use cairoRenderMode >>= \ case
@@ -347,6 +355,7 @@ data GtkWindowState
     , gtkWindow               :: !Gtk.Window
     , theGtkEventBox          :: !Gtk.EventBox
     , theCairoRenderState     :: !CairoRenderState
+    , theAudioPlaybackThread  :: !AudioPlaybackThread
     , theGovernment           :: !WorkerUnion
     , theInitReaction         :: !(ConnectReact PixSize)
     , theResizeReaction       :: !(ConnectReact (OldPixSize, NewPixSize))
@@ -394,6 +403,9 @@ gtkEventBox = lens theGtkEventBox $ \ a b -> a{ theGtkEventBox = b }
 
 cairoRenderState :: Lens' GtkWindowState CairoRenderState
 cairoRenderState = lens theCairoRenderState $ \ a b -> a{ theCairoRenderState = b }
+
+audioPlaybackThread :: Lens' GtkWindowState AudioPlaybackThread
+audioPlaybackThread = lens theAudioPlaybackThread $ \ a b -> a{ theAudioPlaybackThread = b }
 
 gtkCurrentWindowSize :: Lens' GtkWindowState PixSize
 gtkCurrentWindowSize = cairoRenderState . cairoKeepWinSize
@@ -580,9 +592,10 @@ createWin cfg = do
   Gtk.eventBoxSetAboveChild    eventBox True
   logIO _setup $ "Gtk.containerAdd window eventBox"
   Gtk.containerAdd window eventBox
-  this <- newEmptyMVar
-  live <- newEmptyMVar
-  gov  <- newWorkerUnion
+  this  <- newEmptyMVar
+  live  <- newEmptyMVar
+  gov   <- newWorkerUnion
+  audio <- newMVar (const $ return (0, 0))
   let env = GtkWindowState
         { currentConfig            = cfg
         , thisWindow               = this
@@ -595,6 +608,7 @@ createWin cfg = do
             , theCairoRenderMode         = VectorMode
             , theCairoScreenPrinterState = screenPrinterState
             }
+        , theAudioPlaybackThread   = StereoPlaybackThread Nothing audio
         , theGovernment            = gov
         , theInitReaction          = Disconnected
         , theResizeReaction        = Disconnected
@@ -2056,6 +2070,121 @@ gtkCairoDiagram diagram size = snd $ renderDia Cairo
     , _cairoBypassAdjust = True
     }
   ) (diagram $ fromCorners origin (P size))
+
+----------------------------------------------------------------------------------------------------
+
+newtype LinuxAudioOut sample fmt = LinuxAudioOut (MVar (FrameCounter -> PCM sample))
+type StereoPulseCode = Stereo.T PulseCode
+
+stereoFormat :: (LeftPulseCode, RightPulseCode) -> StereoPulseCode
+stereoFormat = uncurry Stereo.cons
+
+-- TODO: determine a more platform-agnostic way of obtaining the default device ID.
+audioDeviceID :: IO String
+audioDeviceID = return "pulse"
+
+minAudioBufferSize :: Int
+minAudioBufferSize = ceiling $ gtkAnimationFrameRate / realToFrac audioSampleRate
+
+makeAudioSource
+  :: Storable fmt
+  => (sample -> fmt) -> SampleCount Int -> MVar (FrameCounter -> PCM sample)
+  -> Linux.SoundSource (LinuxAudioOut sample) fmt
+makeAudioSource format _bufSize mvar =
+  Linux.SoundSource
+  { Linux.soundSourceOpen  = return $ LinuxAudioOut mvar --newEmptyMVar
+  , Linux.soundSourceClose = \ (LinuxAudioOut _mvar) -> return () --void $ takeMVar mvar
+  , Linux.soundSourceStart = \ (LinuxAudioOut _mvar) -> return () --newSt >>= putMVar mvar
+  , Linux.soundSourceStop  = \ (LinuxAudioOut _mvar) -> return () --void $ takeMVar mvar
+  , Linux.soundSourceRead  = \ (LinuxAudioOut mvar) ptr bufSize -> do
+      let writer t i pcm = if i >= bufSize then return (pcm, t) else do
+            sample <- runPCM $ pcm t
+            pokeElemOff ptr i $ format sample
+            ((writer $! t + 1) $! i + 1) pcm
+      let loop t = modifyMVar mvar (writer t 0) >>= loop
+      loop 0
+  }   
+
+makeStereoSource
+  :: SampleCount Int -> MVar (FrameCounter -> PCM (LeftPulseCode, RightPulseCode))
+  -> Linux.SoundSource (LinuxAudioOut (LeftPulseCode, RightPulseCode)) StereoPulseCode
+makeStereoSource = makeAudioSource stereoFormat
+
+makeMonoSource
+  :: SampleCount Int -> MVar (FrameCounter -> PCM PulseCode)
+  -> Linux.SoundSource (LinuxAudioOut PulseCode) PulseCode
+makeMonoSource = makeAudioSource id
+
+data AudioPlaybackThread
+  = MonoPlaybackThread
+      !(Maybe ThreadId) !(MVar (FrameCounter -> PCM PulseCode))
+  | StereoPlaybackThread
+      !(Maybe ThreadId) !(MVar (FrameCounter -> PCM (LeftPulseCode, RightPulseCode)))
+
+makeAudioFormat :: Storable fmt => Linux.SoundFmt fmt
+makeAudioFormat = Linux.SoundFmt (round audioSampleRate)
+
+startPlaybackThread :: BufferSizeRequest -> PCMGenerator -> IO AudioPlaybackThread
+startPlaybackThread reqSize gen = do
+  devID <- audioDeviceID
+  let bufSize = max minAudioBufferSize $ ceiling $ reqSize * realToFrac audioSampleRate
+  let sink linFmt = Linux.alsaSoundSink devID linFmt
+  let make constr src linFmt chans gen = newMVar gen >>= \ mvar -> flip constr mvar . Just <$>
+        forkOS (Linux.copySound (src bufSize mvar) (sink linFmt) $ chans * bufSize)
+  case gen of
+    PCMGenerateStereo gen -> make StereoPlaybackThread makeStereoSource makeAudioFormat 2 gen
+    PCMGenerateMono   gen -> make MonoPlaybackThread   makeMonoSource   makeAudioFormat 1 gen
+
+instance AudioPlayback (GUI GtkWindow model) where
+  audioPlayback newGen = liftGtkStateIntoGUI _audioevt "audioPlayback" $ do
+    oldGen <- use audioPlaybackThread
+    let done thid = return $ maybe PCMDeactivated (const PCMActivated) thid
+    let switch constr gen = do
+          mvar <- liftIO $ newMVar gen
+          audioPlaybackThread .= constr Nothing mvar
+          return PCMDeactivated
+    case (oldGen, newGen) of
+      (StereoPlaybackThread thid mvar, PCMGenerateStereo newGen) ->
+        liftIO $ swapMVar mvar newGen >> done thid
+      (MonoPlaybackThread   thid mvar, PCMGenerateMono   newGen) ->
+        liftIO $ swapMVar mvar newGen >> done thid
+      (StereoPlaybackThread Nothing _, PCMGenerateMono   newGen) ->
+        switch MonoPlaybackThread newGen
+      (MonoPlaybackThread   Nothing _, PCMGenerateStereo newGen) ->
+        switch StereoPlaybackThread newGen
+      (StereoPlaybackThread Just{}  _, PCMGenerateMono   _     ) -> return $ PCMError
+        "Audio playback is active in stereo mode, cannot set mono mode PCM generator"
+      (MonoPlaybackThread   Just{}  _, PCMGenerateStereo _     ) -> return $ PCMError
+        "Audio playback is active in mono mode, cannot set stereo mode PCM generator"
+
+  startupAudioPlayback sizeReq = liftGtkStateIntoGUI _audioevt "startupAudioPlayback" $ do
+    let launch mvar constGen =
+          liftIO (readMVar mvar >>= startPlaybackThread sizeReq . constGen) >>=
+          assign audioPlaybackThread >>
+          return PCMActivated
+    let already = return $ PCMError
+          "audioPlaybackThread called, audio playback is already activated."
+    use audioPlaybackThread >>= \ case
+      StereoPlaybackThread Nothing mvar -> launch mvar PCMGenerateStereo
+      MonoPlaybackThread   Nothing mvar -> launch mvar PCMGenerateMono
+      StereoPlaybackThread Just{}  _    -> already
+      MonoPlaybackThread   Just{}  _    -> already
+
+  shutdownAudioPlayback = liftGtkStateIntoGUI _audioevt "shutdownAudioPlayback" $ do
+    let shutdown thid = liftIO (killThread thid) >> return PCMDeactivated
+    let already = return $ PCMError
+          "shutdownAudioPlayback called, audio playback is already deactivated"
+    use audioPlaybackThread >>= \ case
+      StereoPlaybackThread (Just thid) _ -> shutdown thid
+      MonoPlaybackThread   (Just thid) _ -> shutdown thid
+      StereoPlaybackThread  Nothing    _ -> already
+      MonoPlaybackThread    Nothing    _ -> already
+
+  audioPlaybackState = liftGtkStateIntoGUI _audioevt "audioPlaybackState" $
+    ( maybe PCMDeactivated (const PCMActivated) . \ case
+        StereoPlaybackThread thid _ -> thid
+        MonoPlaybackThread   thid _ -> thid
+    ) <$> use audioPlaybackThread
 
 ----------------------------------------------------------------------------------------------------
 
