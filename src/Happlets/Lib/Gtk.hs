@@ -12,7 +12,8 @@ module Happlets.Lib.Gtk
     -- | Functions that allow you to call directly into a "Graphics.Rendering.Cairo".'Cairo.Render'
     -- function, but using point, line, and color values specified in the "Happlets.Draw"
     -- sub-modules.
-    CairoRender, cairoRender, GtkCairoDiagram, gtkCairoDiagram,
+    CairoRender, cairoRender,
+    --GtkCairoDiagram, gtkCairoDiagram,
     cairoClearCanvas, cairoSetColor, cairoGridLocationOfPoint,
     cairoDrawPath, cairoMoveTo, cairoLineTo, cairoDrawLine,
     cairoDrawRect, cairoPreserve,
@@ -74,13 +75,13 @@ import qualified Graphics.UI.Gtk.Gdk.Pixmap         as Gtk
 import qualified Sound.ALSA.PCM     as Linux
 import qualified Sound.Frame.Stereo as Stereo
 
-import           Diagrams.Backend.Cairo.Internal
-import           Diagrams.BoundingBox
-import           Diagrams.Core.Compile
-import           Diagrams.Core.Types              (Diagram)
-import           Diagrams.Size                    (dims)
+--import           Diagrams.Backend.Cairo.Internal
+--import           Diagrams.BoundingBox
+--import           Diagrams.Core.Compile
+--import           Diagrams.Core.Types              (Diagram)
+--import           Diagrams.Size                    (dims)
 
-import           Linear.Affine
+--import           Linear.Affine
 import           Linear.V2 (V2(..))
 
 import           System.IO
@@ -1163,7 +1164,8 @@ cairoSetFontStyle :: Bool -> FontStyle -> FontStyle -> Cairo.Render FontStyle
 cairoSetFontStyle force oldStyle newStyle0 = do
   logIO <- mkLogger "cairoSetFontStyle"
   let newStyle = newStyle0 & fontSize %~ max 6.0 . min 600.0
-  let changed getter = force || getter oldStyle /= getter newStyle
+  let changed :: Eq a => (FontStyle -> a) -> Bool
+      changed getter = force || getter oldStyle /= getter newStyle
   if changed theFontSize || changed theFontBold || changed theFontItalic
    then do
     when (changed theFontBold || changed theFontItalic) $ do
@@ -1924,10 +1926,10 @@ gdkBlit canvas pixmap (V2 dx dy)  = do
 
 ----------------------------------------------------------------------------------------------------
 
--- | A 'GtkDrawing' is a function that produces a 'Diagrams.Core.Types.Diagram' from a
--- 'Diagrams.BoundingBox.BoundingBox'. Use the 'Diagrams.BoundingBox.BoundingBox' information to
--- inform the placement and scale of your diagram.
-type GtkCairoDiagram = BoundingBox V2 Double -> Diagram Cairo
+--  -- | A 'GtkDrawing' is a function that produces a 'Diagrams.Core.Types.Diagram' from a
+--  -- 'Diagrams.BoundingBox.BoundingBox'. Use the 'Diagrams.BoundingBox.BoundingBox' information to
+--  -- inform the placement and scale of your diagram.
+--  type GtkCairoDiagram = BoundingBox V2 Double -> Diagram Cairo
 
 -- | This data type contains a pointer to an image buffer in memory, and also a function used to
 -- perform some drawing to the pixel values.
@@ -2058,18 +2060,18 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
       gdkBlit targ src offset
 #endif
 
--- | Convert a 'GtkCairoDiagram', which is a type of 'Diagrams.Core.Types.Diagram', and convert it
--- to a Cairo 'Cairo.Render'-ing computation which can be used to set the 'controlView' of the
--- 'Controller'.
-gtkCairoDiagram :: GtkCairoDiagram -> V2 Double -> Cairo.Render ()
-gtkCairoDiagram diagram size = snd $ renderDia Cairo
-  ( CairoOptions
-    { _cairoFileName     = ""
-    , _cairoSizeSpec     = dims size
-    , _cairoOutputType   = RenderOnly
-    , _cairoBypassAdjust = True
-    }
-  ) (diagram $ fromCorners origin (P size))
+--  -- | Convert a 'GtkCairoDiagram', which is a type of 'Diagrams.Core.Types.Diagram', and convert it
+--  -- to a Cairo 'Cairo.Render'-ing computation which can be used to set the 'controlView' of the
+--  -- 'Controller'.
+--  gtkCairoDiagram :: GtkCairoDiagram -> V2 Double -> Cairo.Render ()
+--  gtkCairoDiagram diagram size = snd $ renderDia Cairo
+--    ( CairoOptions
+--      { _cairoFileName     = ""
+--      , _cairoSizeSpec     = dims size
+--      , _cairoOutputType   = RenderOnly
+--      , _cairoBypassAdjust = True
+--      }
+--    ) (diagram $ fromCorners origin (P size))
 
 ----------------------------------------------------------------------------------------------------
 
@@ -2105,14 +2107,15 @@ makeAudioSource format _bufSize mvar =
       loop 0
   }   
 
-makeStereoSource
-  :: SampleCount Int -> MVar (FrameCounter -> PCM (LeftPulseCode, RightPulseCode))
-  -> Linux.SoundSource (LinuxAudioOut (LeftPulseCode, RightPulseCode)) StereoPulseCode
+type MakeAudioSource sample fmt
+  =  SampleCount Int
+  -> MVar (FrameCounter -> PCM sample)
+  -> Linux.SoundSource (LinuxAudioOut sample) fmt
+
+makeStereoSource :: MakeAudioSource (LeftPulseCode, RightPulseCode) StereoPulseCode
 makeStereoSource = makeAudioSource stereoFormat
 
-makeMonoSource
-  :: SampleCount Int -> MVar (FrameCounter -> PCM PulseCode)
-  -> Linux.SoundSource (LinuxAudioOut PulseCode) PulseCode
+makeMonoSource :: MakeAudioSource PulseCode PulseCode
 makeMonoSource = makeAudioSource id
 
 data AudioPlaybackThread
@@ -2128,9 +2131,19 @@ startPlaybackThread :: BufferSizeRequest -> PCMGenerator -> IO AudioPlaybackThre
 startPlaybackThread reqSize gen = do
   devID <- audioDeviceID
   let bufSize = max minAudioBufferSize $ ceiling $ reqSize * realToFrac audioSampleRate
-  let sink linFmt = Linux.alsaSoundSink devID linFmt
-  let make constr src linFmt chans gen = newMVar gen >>= \ mvar -> flip constr mvar . Just <$>
-        forkOS (Linux.copySound (src bufSize mvar) (sink linFmt) $ chans * bufSize)
+  let sink :: Linux.SampleFmt fmt => Linux.SoundFmt fmt -> Linux.SoundSink Linux.Pcm fmt
+      sink = Linux.alsaSoundSink devID
+  let make :: Linux.SampleFmt fmt
+        => (Maybe ThreadId -> MVar (FrameCounter -> PCM sample) -> AudioPlaybackThread)
+        -> MakeAudioSource sample fmt
+        -> Linux.SoundFmt fmt
+        -> Int
+        -> (FrameCounter -> PCM sample)
+        -> IO AudioPlaybackThread
+      make constr src linFmt chans gen = do
+        mvar <- newMVar gen
+        fmap (flip constr mvar . Just) $ forkOS $
+          Linux.copySound (src bufSize mvar) (sink linFmt) $ chans * bufSize
   case gen of
     PCMGenerateStereo gen -> make StereoPlaybackThread makeStereoSource makeAudioFormat 2 gen
     PCMGenerateMono   gen -> make MonoPlaybackThread   makeMonoSource   makeAudioFormat 1 gen
@@ -2158,7 +2171,11 @@ instance AudioPlayback (GUI GtkWindow model) where
         "Audio playback is active in mono mode, cannot set stereo mode PCM generator"
 
   startupAudioPlayback sizeReq = liftGtkStateIntoGUI _audioevt "startupAudioPlayback" $ do
-    let launch mvar constGen =
+    let launch
+          :: MVar (FrameCounter -> PCM sample)
+          -> ((FrameCounter -> PCM sample) -> PCMGenerator)
+          -> GtkState PCMActivation
+        launch mvar constGen =
           liftIO (readMVar mvar >>= startPlaybackThread sizeReq . constGen) >>=
           assign audioPlaybackThread >>
           return PCMActivated

@@ -1,0 +1,83 @@
+# Copyright (C) 2018-2019  Ramin Honary.
+#
+# "procgen" is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License (AGPL)
+# as published by the Free Software Foundation.
+#
+# "procgen" is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# See the GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program (see the file called "LICENSE"). If not, see
+# <http://www.gnu.org/licenses/agpl.html>.
+
+name:         happlets-lib-gtk
+version:      0.1.0.0
+synopsis:     The "Haskell Applets" Gtk+ ver. 2 back-end for "happlets".
+license:      AGPL
+copyright:    "2017-2019 Ramin Honary"
+author:       "Ramin Honary"
+maintainer:   "ramin.honary@gmail.com"
+github:       "RaminHAL9001/happlets-lib-gtk"
+category:     GUI, Game
+
+extra-source-files:
+- README.md
+
+dependencies:
+- base
+- alsa-pcm
+- array
+- cairo
+- containers
+- directory
+- glib
+- gtk
+- happlets
+- lens
+- linear
+- mtl
+- pango
+- sample-frame
+- semigroups
+- text
+- time
+
+default-extensions:
+- DeriveDataTypeable
+- DeriveFunctor
+- ExistentialQuantification
+- FlexibleContexts
+- FlexibleInstances
+- FunctionalDependencies
+- GADTs
+- GeneralizedNewtypeDeriving
+- ImplicitParams
+- LambdaCase
+- MultiParamTypeClasses
+- NoMonomorphismRestriction
+- OverloadedStrings
+- RankNTypes
+- ScopedTypeVariables
+- StandaloneDeriving
+
+ghc-options:
+-   -Wall
+-   -fno-warn-name-shadowing
+-   -fno-warn-unused-do-bind
+
+library:
+  source-dirs: src
+  exposed-modules:
+  - Happlets.Lib.Gtk
+
+tests:
+  happlets-lib-gtk-test:
+    main:         Happlets/Lib/Gtk/TestSuite.hs
+    source-dirs:  src
+    ghc-options:
+    -   -threaded
+    dependencies:
+    - happlets-lib-gtk
