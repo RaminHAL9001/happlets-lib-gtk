@@ -1164,7 +1164,8 @@ cairoSetFontStyle :: Bool -> FontStyle -> FontStyle -> Cairo.Render FontStyle
 cairoSetFontStyle force oldStyle newStyle0 = do
   logIO <- mkLogger "cairoSetFontStyle"
   let newStyle = newStyle0 & fontSize %~ max 6.0 . min 600.0
-  let changed getter = force || getter oldStyle /= getter newStyle
+  let changed :: Eq a => (FontStyle -> a) -> Bool
+      changed getter = force || getter oldStyle /= getter newStyle
   if changed theFontSize || changed theFontBold || changed theFontItalic
    then do
     when (changed theFontBold || changed theFontItalic) $ do
@@ -2106,14 +2107,15 @@ makeAudioSource format _bufSize mvar =
       loop 0
   }   
 
-makeStereoSource
-  :: SampleCount Int -> MVar (FrameCounter -> PCM (LeftPulseCode, RightPulseCode))
-  -> Linux.SoundSource (LinuxAudioOut (LeftPulseCode, RightPulseCode)) StereoPulseCode
+type MakeAudioSource sample fmt
+  =  SampleCount Int
+  -> MVar (FrameCounter -> PCM sample)
+  -> Linux.SoundSource (LinuxAudioOut sample) fmt
+
+makeStereoSource :: MakeAudioSource (LeftPulseCode, RightPulseCode) StereoPulseCode
 makeStereoSource = makeAudioSource stereoFormat
 
-makeMonoSource
-  :: SampleCount Int -> MVar (FrameCounter -> PCM PulseCode)
-  -> Linux.SoundSource (LinuxAudioOut PulseCode) PulseCode
+makeMonoSource :: MakeAudioSource PulseCode PulseCode
 makeMonoSource = makeAudioSource id
 
 data AudioPlaybackThread
@@ -2129,9 +2131,19 @@ startPlaybackThread :: BufferSizeRequest -> PCMGenerator -> IO AudioPlaybackThre
 startPlaybackThread reqSize gen = do
   devID <- audioDeviceID
   let bufSize = max minAudioBufferSize $ ceiling $ reqSize * realToFrac audioSampleRate
-  let sink linFmt = Linux.alsaSoundSink devID linFmt
-  let make constr src linFmt chans gen = newMVar gen >>= \ mvar -> flip constr mvar . Just <$>
-        forkOS (Linux.copySound (src bufSize mvar) (sink linFmt) $ chans * bufSize)
+  let sink :: Linux.SampleFmt fmt => Linux.SoundFmt fmt -> Linux.SoundSink Linux.Pcm fmt
+      sink = Linux.alsaSoundSink devID
+  let make :: Linux.SampleFmt fmt
+        => (Maybe ThreadId -> MVar (FrameCounter -> PCM sample) -> AudioPlaybackThread)
+        -> MakeAudioSource sample fmt
+        -> Linux.SoundFmt fmt
+        -> Int
+        -> (FrameCounter -> PCM sample)
+        -> IO AudioPlaybackThread
+      make constr src linFmt chans gen = do
+        mvar <- newMVar gen
+        fmap (flip constr mvar . Just) $ forkOS $
+          Linux.copySound (src bufSize mvar) (sink linFmt) $ chans * bufSize
   case gen of
     PCMGenerateStereo gen -> make StereoPlaybackThread makeStereoSource makeAudioFormat 2 gen
     PCMGenerateMono   gen -> make MonoPlaybackThread   makeMonoSource   makeAudioFormat 1 gen
@@ -2159,7 +2171,11 @@ instance AudioPlayback (GUI GtkWindow model) where
         "Audio playback is active in mono mode, cannot set stereo mode PCM generator"
 
   startupAudioPlayback sizeReq = liftGtkStateIntoGUI _audioevt "startupAudioPlayback" $ do
-    let launch mvar constGen =
+    let launch
+          :: MVar (FrameCounter -> PCM sample)
+          -> ((FrameCounter -> PCM sample) -> PCMGenerator)
+          -> GtkState PCMActivation
+        launch mvar constGen =
           liftIO (readMVar mvar >>= startPlaybackThread sizeReq . constGen) >>=
           assign audioPlaybackThread >>
           return PCMActivated
