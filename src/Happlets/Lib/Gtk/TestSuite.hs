@@ -51,7 +51,7 @@ main = happlet gtkHapplet $ do
 
 data RedGrid
   = RedGrid
-    { theRedGridScale :: RealApprox
+    { theRedGridScale :: Double
     , theLastMouse    :: Maybe PixCoord
     , theMouseBox     :: Maybe TextBoundingBox
     }
@@ -60,13 +60,13 @@ data RedGrid
 lastMouse :: Lens' RedGrid (Maybe PixCoord)
 lastMouse = lens theLastMouse $ \ a b -> a{ theLastMouse = b }
 
-redGridScale :: Lens' RedGrid RealApprox
+redGridScale :: Lens' RedGrid Double
 redGridScale = lens theRedGridScale $ \ a b -> a{ theRedGridScale = b }
 
 mouseBox :: Lens' RedGrid (Maybe TextBoundingBox)
 mouseBox = lens theMouseBox $ \ a b -> a{ theMouseBox = b }
 
-redGridDraw :: RealApprox -> PixSize -> CairoRender ()
+redGridDraw :: Double -> PixSize -> CairoRender ()
 redGridDraw scale winsize = do
   let (V2 w h) = realToFrac <$> winsize
   if scale <= 1 then clearScreen red else do
@@ -104,7 +104,7 @@ redGridGUI ctx _size = do
           redGridScale %= \ scale -> if scale <= 4.0 then 64.0 else scale / 2.0
           getWindowSize >>= draw
         _          -> return ()
-      (RealApprox scale) <- use redGridScale
+      scale <- use redGridScale
       mb <- use mouseBox
       refreshRegion $ fmap ((sampCoord :: Int -> SampCoord) . floor) <$> maybeToList mb
       mb <- onOSBuffer $ screenPrinter $

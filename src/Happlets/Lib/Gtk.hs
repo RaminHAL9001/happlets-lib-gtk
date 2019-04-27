@@ -1114,8 +1114,9 @@ instance Happlet2DGraphics CairoRender where
   drawPath a b c   = vectorMode >> cairoRender (cairoDrawPath a b c)
   drawRect a b c d = vectorMode >> cairoRender (cairoDrawRect a b c d)
   getPoint a       = cairoRender (cairoFlush >> cairoGetPoint a)
-  setPoint a@(V2 (RealApprox x) (RealApprox y)) b =
-    rasterMode x y >> cairoRender (cairoSetPoint a b)
+  setPoint a@(V2 x y) b = do
+    rasterMode (realToFrac x) (realToFrac y)
+    cairoRender (cairoSetPoint a b)
 
 instance RenderText CairoRender where
   getRendererFontStyle = CairoRender $ use $ cairoScreenPrinterState . fontStyle
@@ -1210,8 +1211,8 @@ cairoPrintNoAdvance doDisplay str = do
     when doDisplay $ do
       liftIO $ logIO _textevt $ "cairoDrawRect "
         ++ show (theFontBackColor style)
-        ++ ' ' : show ((RealApprox <$> rect) ^. rect2DPoints) ++ " -- background"
-      cairoDrawRect (theFontBackColor style) 0 (theFontBackColor style) (RealApprox <$> rect)
+        ++ ' ' : show (rect ^. rect2DPoints) ++ " -- background"
+      cairoDrawRect (theFontBackColor style) (0::Double) (theFontBackColor style) rect
       liftIO $ logIO _textevt $ "moveTo "
         ++ show gridX       ++ ' ':show gridY
         ++ " setColor "    ++ show (theFontForeColor style)
@@ -1254,11 +1255,11 @@ cairoArray f = Cairo.withTargetSurface $ \ surface -> do
   h <- Cairo.imageSurfaceGetHeight surface
   liftIO $ Cairo.imageSurfaceGetPixels surface >>= f w h
 
-pointToInt :: Int -> Int -> Point2D RealApprox -> Int
+pointToInt :: RealFrac n => Int -> Int -> Point2D n -> Int
 pointToInt w _h pt = let (x, y) = (round <$> pt) ^. pointXY in y*w + x
 
 -- | The implementation of 'Happlets.Draw.getPoint' for the 'Cairo.Render' function type.
-cairoGetPoint :: Point2D RealApprox -> Cairo.Render Color
+cairoGetPoint :: RealFrac n => Point2D n -> Cairo.Render Color
 cairoGetPoint pt = cairoArray $ \ w h surfaceData ->
   liftIO $ set32BitsARGB <$> readArray surfaceData (pointToInt w h pt)
 
@@ -1270,7 +1271,7 @@ cairoFlush :: Cairo.Render ()
 cairoFlush = Cairo.withTargetSurface Cairo.surfaceFlush
 
 -- | Force a single pixel at a given location to change to the given color.
-cairoSetPoint :: Point2D RealApprox -> Color -> Cairo.Render ()
+cairoSetPoint :: RealFrac n => Point2D n -> Color -> Cairo.Render ()
 cairoSetPoint pt = get32BitsARGB >>> \ w32 -> cairoArray $ \ w h surfaceData ->
   liftIO $ writeArray surfaceData (pointToInt w h pt) w32
 
@@ -1293,21 +1294,23 @@ cairoPreserve :: CairoRender a -> CairoRender a
 cairoPreserve f = cairoRender Cairo.save >> f <* cairoRender Cairo.restore
 
 -- | Move the position of the cairo graphics context "pen" object.
-cairoMoveTo :: Point2D RealApprox -> Cairo.Render ()
-cairoMoveTo = uncurry Cairo.moveTo . view pointXY . fmap unwrapRealApprox
+cairoMoveTo :: RealFrac n => Point2D n -> Cairo.Render ()
+cairoMoveTo = uncurry Cairo.moveTo . view pointXY . fmap realToFrac
 
 -- | Using the cairo graphics context current color, and the position of the "pen" object, draw a
 -- line from the current pen position to the given point.
-cairoLineTo :: Point2D RealApprox -> Cairo.Render ()
-cairoLineTo = uncurry Cairo.lineTo . view pointXY . fmap unwrapRealApprox
+cairoLineTo :: RealFrac n => Point2D n -> Cairo.Render ()
+cairoLineTo = uncurry Cairo.lineTo . view pointXY . fmap realToFrac
 
 -- | Draw a single line of the given color. This will also draw the line caps at the start and end
 -- points.
-cairoDrawLine :: LineColor -> LineWidth -> Line2D RealApprox -> Cairo.Render ()
+cairoDrawLine
+  :: (RealFrac n, RealFrac lw)
+  => LineColor -> LineWidth lw -> Line2D n -> Cairo.Render ()
 cairoDrawLine color width line = do
   cairoSetColor color
   Cairo.setLineCap Cairo.LineCapRound
-  Cairo.setLineWidth $ unwrapRealApprox width
+  Cairo.setLineWidth $ realToFrac width
   cairoMoveTo $ line ^. line2DHead
   cairoLineTo $ line ^. line2DTail
   Cairo.stroke
@@ -1315,30 +1318,34 @@ cairoDrawLine color width line = do
 -- | Similar to 'cairoDrawLine' but draws multiple line segments, each next segment beginning where
 -- the previous segment ended. The line is drawn with the given color. Only two line caps are drawn:
 -- one at the first given point and one at the last given point in the list of points.
-cairoDrawPath :: LineColor -> LineWidth -> [Point2D RealApprox] -> Cairo.Render ()
+cairoDrawPath
+  :: (RealFrac n, RealFrac lw)
+  => LineColor -> LineWidth lw -> [Point2D n] -> Cairo.Render ()
 cairoDrawPath color width =
   let run a ax = do
         cairoSetColor color
         Cairo.setLineCap Cairo.LineCapRound
-        Cairo.setLineWidth $ unwrapRealApprox width
+        Cairo.setLineWidth $ realToFrac width
         Cairo.setLineJoin Cairo.LineJoinMiter
         cairoMoveTo a
         forM_ ax cairoLineTo
         Cairo.stroke
   in  \ case { [] -> return (); [a] -> run a [a]; a:ax -> run a ax; }
 
-cairoDrawRect :: LineColor -> LineWidth -> FillColor -> Rect2D RealApprox -> Cairo.Render ()
+cairoDrawRect
+  :: (RealFrac n, RealFrac lw)
+  => LineColor -> LineWidth lw -> FillColor -> Rect2D n -> Cairo.Render ()
 cairoDrawRect lineColor width fillColor rect = do
   cairoSetColor fillColor
   cairoMoveTo $ rect ^. rect2DHead
-  let (head, tail) = (unwrapRealApprox <$> canonicalRect2D rect) ^. rect2DPoints
+  let (head, tail) = (realToFrac <$> canonicalRect2D rect) ^. rect2DPoints
   let (x, y) = head ^. pointXY
   let (w, h) = (tail - head) ^. pointXY
   Cairo.rectangle x y w h
   Cairo.fill
   when (width > 0.0) $ do
     cairoSetColor lineColor
-    Cairo.setLineWidth $ unwrapRealApprox width
+    Cairo.setLineWidth $ realToFrac width
     Cairo.setLineJoin Cairo.LineJoinMiter
     Cairo.rectangle x y w h
     Cairo.stroke
