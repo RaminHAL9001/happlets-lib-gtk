@@ -7,7 +7,6 @@ Makefile.bak
 tags
 TAGS
 *~
-*.cabal
 *.dyn_hi
 *.dyn_o
 *.hi
