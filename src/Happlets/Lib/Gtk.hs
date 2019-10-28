@@ -45,7 +45,6 @@ import           Data.Bits
 import           Data.IORef
 import qualified Data.Map          as Map
 import           Data.Maybe
-import           Data.Semigroup
 import qualified Data.Text         as Strict
 import           Data.Time.Clock
 import           Data.Word

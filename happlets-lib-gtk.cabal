@@ -1,44 +1,54 @@
-cabal-version: 1.12
+name:               happlets-lib-gtk
+version:            0.1.0.0
+synopsis:           The "Haskell Applets" Gtk+ ver. 2 back-end for "happlets".
+category:           GUI, Game
+homepage:           https://github.com/RaminHAL9001/happlets-lib-gtk#readme
+bug-reports:        https://github.com/RaminHAL9001/happlets-lib-gtk/issues
+author:             Ramin Honary
+maintainer:         ramin.honary@gmail.com
+copyright:          2017-2019 Ramin Honary
+license:            AGPL
+license-file:       LICENSE
+build-type:         Simple
+cabal-version:      1.12
 
--- This file has been generated from package.yaml by hpack version 0.31.1.
---
--- see: https://github.com/sol/hpack
---
--- hash: 42b7de4ce7729166af43d3075510a07d74a9ba93a22465bf74793b3beca626c3
-
-name:           happlets-lib-gtk
-version:        0.1.0.0
-synopsis:       The "Haskell Applets" Gtk+ ver. 2 back-end for "happlets".
-category:       GUI, Game
-homepage:       https://github.com/RaminHAL9001/happlets-lib-gtk#readme
-bug-reports:    https://github.com/RaminHAL9001/happlets-lib-gtk/issues
-author:         Ramin Honary
-maintainer:     ramin.honary@gmail.com
-copyright:      2017-2019 Ramin Honary
-license:        AGPL
-license-file:   LICENSE
-build-type:     Simple
 extra-source-files:
-    README.md
+  README.md
 
 source-repository head
-  type: git
+  type:     git
   location: https://github.com/RaminHAL9001/happlets-lib-gtk
 
 library
+  default-language: Haskell2010
+  hs-source-dirs: src
   exposed-modules:
-      Happlets.Lib.Gtk
+    Happlets.Lib.Gtk
   other-modules:
-      Happlets.Lib.Gtk.TestSuite
-      Paths_happlets_lib_gtk
-  hs-source-dirs:
-      src
-  default-extensions: DeriveDataTypeable DeriveFunctor ExistentialQuantification FlexibleContexts FlexibleInstances FunctionalDependencies GADTs GeneralizedNewtypeDeriving ImplicitParams LambdaCase MultiParamTypeClasses NoMonomorphismRestriction OverloadedStrings RankNTypes ScopedTypeVariables StandaloneDeriving
-  ghc-options: -Wall -fno-warn-name-shadowing -fno-warn-unused-do-bind
+    Paths_happlets_lib_gtk
+  default-extensions:
+    DeriveDataTypeable
+    DeriveFunctor
+    ExistentialQuantification
+    FlexibleContexts
+    FlexibleInstances
+    FunctionalDependencies
+    GADTs
+    GeneralizedNewtypeDeriving
+    ImplicitParams
+    LambdaCase
+    MultiParamTypeClasses
+    NoMonomorphismRestriction
+    OverloadedStrings
+    RankNTypes
+    ScopedTypeVariables
+    StandaloneDeriving
+  ghc-options:
+    -Wall -fno-warn-name-shadowing -fno-warn-unused-do-bind
   build-depends:
-      alsa-pcm
+      base
+    , alsa-pcm
     , array
-    , base
     , cairo
     , containers
     , directory
@@ -53,22 +63,37 @@ library
     , semigroups
     , text
     , time
-  default-language: Haskell2010
 
 test-suite happlets-lib-gtk-test
-  type: exitcode-stdio-1.0
-  main-is: Happlets/Lib/Gtk/TestSuite.hs
+  default-language: Haskell2010
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   tests
+  main-is:          HappletsGtkTests.hs
   other-modules:
-      Happlets.Lib.Gtk
-      Paths_happlets_lib_gtk
-  hs-source-dirs:
-      src
-  default-extensions: DeriveDataTypeable DeriveFunctor ExistentialQuantification FlexibleContexts FlexibleInstances FunctionalDependencies GADTs GeneralizedNewtypeDeriving ImplicitParams LambdaCase MultiParamTypeClasses NoMonomorphismRestriction OverloadedStrings RankNTypes ScopedTypeVariables StandaloneDeriving
-  ghc-options: -Wall -fno-warn-name-shadowing -fno-warn-unused-do-bind -threaded
+    Paths_happlets_lib_gtk
+  default-extensions:
+    DeriveDataTypeable
+    DeriveFunctor
+    ExistentialQuantification
+    FlexibleContexts
+    FlexibleInstances
+    FunctionalDependencies
+    GADTs
+    GeneralizedNewtypeDeriving
+    ImplicitParams
+    LambdaCase
+    MultiParamTypeClasses
+    NoMonomorphismRestriction
+    OverloadedStrings
+    RankNTypes
+    ScopedTypeVariables
+    StandaloneDeriving
+  ghc-options:
+    -Wall -fno-warn-name-shadowing -fno-warn-unused-do-bind -threaded
   build-depends:
-      alsa-pcm
+      base
+    , alsa-pcm
     , array
-    , base
     , cairo
     , containers
     , directory
@@ -84,4 +109,3 @@ test-suite happlets-lib-gtk-test
     , semigroups
     , text
     , time
-  default-language: Haskell2010
