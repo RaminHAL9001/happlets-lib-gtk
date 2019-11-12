@@ -2226,7 +2226,7 @@ gtkHapplet = Provider
       , theRecommendWindowSize     = (800, 600)
       , theAnimationFrameRate      = gtkAnimationFrameRate
       , willDecorateWindow         = True
-      , willQuitOnWindowClose      = False
+      , willQuitOnWindowClose      = True
       , willDeleteWindowOnClose    = False
       }
   , doInitializeGUI         = gtkInit
