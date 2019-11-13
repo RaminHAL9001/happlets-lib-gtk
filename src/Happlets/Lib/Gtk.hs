@@ -1802,9 +1802,7 @@ packGtkModifiers = packModifiers .
       Gtk.Lock    -> [CapsLockKey]
       Gtk.Control -> [CtrlKey]
       Gtk.Alt     -> [AltKey]
-      Gtk.Alt2    -> [CommandKey]
       Gtk.Super   -> [Super1Key]
-      Gtk.Hyper   -> [Super2Key]
       _           -> []
   )
 
