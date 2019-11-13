@@ -1443,7 +1443,7 @@ instance CanRecruitWorkers GtkWindow where
     lockedWinRef <- case theGUIWindow guist of
       GtkLockedWin winst -> pure $ GtkUnlockedWin $ thisWindow winst
       GtkUnlockedWin{}   -> error
-        "inOtherThreadGUI: was given GUIState containing a locked window."
+        "inOtherThreadGUI: was given GUIState containing an unlocked window."
     lockGtkWindow logIO _workers lockedWinRef $ do
       winst <- get
       ((result, winst), _model) <- liftIO $ onHapplet (theGUIHapplet guist) $ \ model -> do

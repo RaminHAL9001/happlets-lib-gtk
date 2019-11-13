@@ -35,6 +35,8 @@ main = happlet gtkHapplet $ do
     , thePulseCirclePosition   = V2 (-1) (-1)
     , thePulseCircleWindowSize = V2  640  480
     , thePulseCircleColor      = blue
+    , thePulseCircleClockStep  = 0
+    , thePulseCircleWorker     = error "uninitialized PulseCircle worker"
     }
 
   redgrid     <- newHapplet (RedGrid 64.0 Nothing Nothing)
@@ -45,7 +47,7 @@ main = happlet gtkHapplet $ do
         , switchToRedGrid      = windowChangeHapplet redgrid     $ redGridGUI     testSuite
         }
 
-  attachWindow True win redgrid $ redGridGUI testSuite
+  attachWindow True win pulsecircle $ pulseCircleGUI testSuite
 
 ----------------------------------------------------------------------------------------------------
 
@@ -135,8 +137,10 @@ data PulseCircle
     , thePulseCirclePosition   :: !(V2 Double)
     , thePulseCircleColor      :: !Color
     , thePulseCircleWindowSize :: !PixSize
+    , thePulseCircleClockStep  :: !Int
+    , thePulseCircleWorker     :: Worker
     }
-  deriving (Eq, Show, Read)
+  deriving (Eq)
 
 pulseCircleRadius :: Lens' PulseCircle Double
 pulseCircleRadius = lens thePulseCircleRadius $ \ a b -> a{ thePulseCircleRadius = b }
@@ -149,6 +153,12 @@ pulseCircleColor = lens thePulseCircleColor $ \ a b -> a{ thePulseCircleColor = 
 
 pulseCircleWindowSize :: Lens' PulseCircle PixSize
 pulseCircleWindowSize = lens thePulseCircleWindowSize $ \ a b -> a{ thePulseCircleWindowSize = b }
+
+pulseCircleWorker :: Lens' PulseCircle Worker
+pulseCircleWorker = lens thePulseCircleWorker $ \ a b -> a{ thePulseCircleWorker = b }
+
+pulseCircleClockStep :: Lens' PulseCircle Int
+pulseCircleClockStep = lens thePulseCircleClockStep $ \ a b -> a{ thePulseCircleClockStep = b }
 
 type Radius  = Double
 type PenSize = Double
@@ -167,6 +177,20 @@ pulseCircleGUI ctx initSize@(V2 (SampCoord w) (SampCoord h)) = do
   pulseCirclePosition %= \ old@(V2 oldW oldH) ->
     if oldW < 0 || oldH < 0 then V2 (realToFrac w / 2) (realToFrac h / 2) else old
   pulseCircleWindowSize .= initSize
+
+  ( guiWorker "Pulse Circle Clock" (WorkCycleWait 1.0) $ do
+      (V2 (SampCoord w) (SampCoord h)) <- use pulseCircleWindowSize
+      let (x, y) = (realToFrac $ div w 2, realToFrac $ div h 2)
+      let r = min x y
+      t <- use pulseCircleClockStep
+      pulseCircleClockStep %= (\ t -> mod (t + 1) 60)
+      let theta = negate $ 2.0 * pi * realToFrac (mod t 60) / 60.0 - pi / 2.0
+      onCanvas $ cairoRender $ do
+        Cairo.moveTo x y
+        Cairo.lineTo (x + r * cos theta) (y - r * sin theta)
+        cairoSetColor white
+        Cairo.stroke
+    ) >>= assign pulseCircleWorker
 
   let mvar = testSuiteSharedState ctx
   -- Declare a function for drawing the model:
@@ -187,9 +211,13 @@ pulseCircleGUI ctx initSize@(V2 (SampCoord w) (SampCoord h)) = do
             --  Cairo.setSourceRGBA  1.0  1.0  1.0  1.0
             --  Cairo.showText $ "came from " <> cameFrom
 
-  changeEvents $ liftIO $ do
-    putStrLn "change away from Pulse Circle"
-    void $ swapMVar mvar "Pulse Circle"
+  changeEvents $ do
+    worker <- use pulseCircleWorker
+    liftIO $ do
+      putStrLn "Began changing away from Pulse Circle."
+      relieveWorker worker
+      void $ swapMVar mvar "Pulse Circle"
+      putStrLn "Completed changing away from Pulse Circle."
 
   keyboardEvents $ \ case
     (Keyboard True (ModifierBits 0) (CharKey ' ')) -> do
