@@ -2,7 +2,7 @@ module Main where
 
 import           Happlets.Lib.Gtk
 
-import           Control.Concurrent.MVar
+import           Control.Concurrent
 
 import           Data.Maybe
 --import           Data.Semigroup
@@ -29,6 +29,7 @@ main = happlet gtkHapplet $ do
   quitOnWindowClose   .= True
 
   mvar        <- liftIO $ newMVar "Main"
+  thisThread  <- liftIO myThreadId
   win         <- newWindow
   pulsecircle <- newHapplet PulseCircle
     { thePulseCircleRadius     = 20
@@ -36,7 +37,7 @@ main = happlet gtkHapplet $ do
     , thePulseCircleWindowSize = V2  640  480
     , thePulseCircleColor      = blue
     , thePulseCircleClockStep  = 0
-    , thePulseCircleWorker     = error "uninitialized PulseCircle worker"
+    , thePulseCircleWorker     = thisThread
     }
 
   redgrid     <- newHapplet (RedGrid 64.0 Nothing Nothing)
@@ -138,7 +139,7 @@ data PulseCircle
     , thePulseCircleColor      :: !Color
     , thePulseCircleWindowSize :: !PixSize
     , thePulseCircleClockStep  :: !Int
-    , thePulseCircleWorker     :: Worker
+    , thePulseCircleWorker     :: !ThreadId
     }
   deriving (Eq)
 
@@ -154,7 +155,7 @@ pulseCircleColor = lens thePulseCircleColor $ \ a b -> a{ thePulseCircleColor = 
 pulseCircleWindowSize :: Lens' PulseCircle PixSize
 pulseCircleWindowSize = lens thePulseCircleWindowSize $ \ a b -> a{ thePulseCircleWindowSize = b }
 
-pulseCircleWorker :: Lens' PulseCircle Worker
+pulseCircleWorker :: Lens' PulseCircle ThreadId
 pulseCircleWorker = lens thePulseCircleWorker $ \ a b -> a{ thePulseCircleWorker = b }
 
 pulseCircleClockStep :: Lens' PulseCircle Int
@@ -178,19 +179,25 @@ pulseCircleGUI ctx initSize@(V2 (SampCoord w) (SampCoord h)) = do
     if oldW < 0 || oldH < 0 then V2 (realToFrac w / 2) (realToFrac h / 2) else old
   pulseCircleWindowSize .= initSize
 
-  ( guiWorker "Pulse Circle Clock" (WorkCycleWait 1.0) $ do
-      (V2 (SampCoord w) (SampCoord h)) <- use pulseCircleWindowSize
-      let (x, y) = (realToFrac $ div w 2, realToFrac $ div h 2)
-      let r = min x y
-      t <- use pulseCircleClockStep
-      pulseCircleClockStep %= (\ t -> mod (t + 1) 60)
-      let theta = negate $ 2.0 * pi * realToFrac (mod t 60) / 60.0 - pi / 2.0
-      onCanvas $ cairoRender $ do
-        Cairo.moveTo x y
-        Cairo.lineTo (x + r * cos theta) (y - r * sin theta)
-        cairoSetColor white
-        Cairo.stroke
-    ) >>= assign pulseCircleWorker
+  let loop runGUI = do
+        putStrLn "Draw white line..."
+        result <- runGUI $ do
+          (V2 (SampCoord w) (SampCoord h)) <- use pulseCircleWindowSize
+          let (x, y) = (realToFrac $ div w 2, realToFrac $ div h 2)
+          let r = min x y
+          t <- use pulseCircleClockStep
+          pulseCircleClockStep %= (\ t -> mod (t + 1) 60)
+          let theta = negate $ 2.0 * pi * realToFrac (mod t 60) / 60.0 - pi / 2.0
+          onCanvas $ cairoRender $ do
+            Cairo.moveTo x y
+            Cairo.lineTo (x + r * cos theta) (y - r * sin theta)
+            cairoSetColor white
+            Cairo.stroke
+        print result
+        threadDelay 1000000
+        loop runGUI
+
+  forkGUI loop >>= assign pulseCircleWorker
 
   let mvar = testSuiteSharedState ctx
   -- Declare a function for drawing the model:
@@ -212,10 +219,10 @@ pulseCircleGUI ctx initSize@(V2 (SampCoord w) (SampCoord h)) = do
             --  Cairo.showText $ "came from " <> cameFrom
 
   changeEvents $ do
-    worker <- use pulseCircleWorker
+    otherThread <- use pulseCircleWorker
     liftIO $ do
       putStrLn "Began changing away from Pulse Circle."
-      relieveWorker worker
+      killThread otherThread
       void $ swapMVar mvar "Pulse Circle"
       putStrLn "Completed changing away from Pulse Circle."
 
