@@ -1431,6 +1431,32 @@ instance Managed GtkWindow where
     }
 
 instance CanRecruitWorkers GtkWindow where
+  forkGUI f = do
+    guist <- getGUIState
+    liftIO $ forkIO $ f $ \ gui -> Gtk.postGUISync $ do
+      logIO <- mkLogger "inOtherThreadRunGUI"
+      -- While a GUI function is evaluating, 'theGUIWindow' is always locked, i.e. set to the
+      -- 'GtkLockedWin' state. This is problematic for spawning new threads, because the new thread
+      -- will need to share the lock with the thread that spawned it. To solve this problem, a
+      -- reference to the lock is stored in the 'thisWindow' pointer. Whenever a new thread is
+      -- created, usually when installing an event handler or when launching a 'Worker' thread, the
+      -- 'GUIState' used to evaluate the 'GUI' function in the new thread is reset to contain the
+      -- 'thisWindow' reference.
+      lockedWinRef <- case theGUIWindow guist of
+        GtkLockedWin winst -> pure $ GtkUnlockedWin $ thisWindow winst
+        GtkUnlockedWin{}   -> error
+          "inOtherThreadGUI: was given GUIState containing an unlocked window."
+      lockGtkWindow logIO _workers lockedWinRef $ do
+        winst <- get
+        ((result, winst), _model) <- liftIO $ onHapplet (theGUIHapplet guist) $ \ model -> do
+          (result, guist) <- runGUI gui guist
+            { theGUIWindow = GtkLockedWin winst
+            , theGUIModel  = model
+            }
+          return ((result, theGUIWindow guist), theGUIModel guist)
+        state $ const $ (,) result $! case winst of
+          GtkLockedWin winst -> winst
+          _                  -> error "runGUI returned unlocked window"
   inOtherThreadRunGUI guist gui = do
     logIO <- mkLogger "inOtherThreadRunGUI"
     -- While a GUI function is evaluating, 'theGUIWindow' is always locked, i.e. set to the
