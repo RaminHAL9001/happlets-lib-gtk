@@ -1140,13 +1140,11 @@ instance RenderText CairoRender where
       (realToFrac col * fontWidth + 1.5)
       (fontHeight * realToFrac row + ascent + 0.5)
 
-  screenPrintNoAdvance = cairoPrintNoAdvance True . fst . spanPrintable
-  screenPrintCharNoAdvance c =
-    if not (isPrint c) then return Nothing else cairoPrintNoAdvance True (c:"")
+  screenPrintNoAdvance = cairoPrintNoAdvance True
+  screenPrintCharNoAdvance = maybe (pure Nothing) (cairoPrintNoAdvance True) . printableChar
 
-  getStringBoundingBox = cairoPrintNoAdvance False . fst . spanPrintable
-  getCharBoundingBox c =
-    if not (isPrint c) then return Nothing else cairoPrintNoAdvance False (c:"")
+  getStringBoundingBox = cairoPrintNoAdvance False
+  getCharBoundingBox = maybe (pure Nothing) (cairoPrintNoAdvance False) . printableChar
 
   getScreenPrinterState = CairoRender $ use cairoScreenPrinterState
   setScreenPrinterState st = CairoRender $ do
@@ -1184,8 +1182,8 @@ cairoSetFontStyle force oldStyle newStyle0 = do
 
 -- not for export
 -- This does NOT evaluate 'spanPrintable' on the input 'String' so it must not be exported.
-cairoPrintNoAdvance :: Bool -> String -> CairoRender (Maybe TextBoundingBox)
-cairoPrintNoAdvance doDisplay str = do
+cairoPrintNoAdvance :: Bool -> PrintableString -> CairoRender (Maybe TextBoundingBox)
+cairoPrintNoAdvance doDisplay = unwrapPrintable >>> \ str -> do
   logIO <- mkLogger "cairoPrintNoAdvance"
   st <- CairoRender $ use cairoScreenPrinterState
   let style = theFontStyle st
