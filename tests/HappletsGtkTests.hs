@@ -48,7 +48,7 @@ main = happlet gtkHapplet $ do
         , switchToRedGrid      = windowChangeHapplet redgrid     $ redGridGUI     testSuite
         }
 
-  attachWindow True win pulsecircle $ pulseCircleGUI testSuite
+  attachWindow True win redgrid $ redGridGUI testSuite
 
 ----------------------------------------------------------------------------------------------------
 
@@ -84,7 +84,7 @@ redGridDraw scale winsize = do
         renderOffset .= V2 0 0
         gridRow      .= 0
         gridColumn   .= 0
-        displayString $ "Grid square size = " ++ show scale
+        displayString $ "Grid size = " ++ show scale ++ "\n\nWindow = " ++ show winsize ++ "\n"
 
 redGridGUI :: TestSuite -> PixSize -> GtkGUI RedGrid ()
 redGridGUI ctx _size = do
