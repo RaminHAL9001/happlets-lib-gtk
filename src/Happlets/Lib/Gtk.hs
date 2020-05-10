@@ -7,7 +7,7 @@
 module Happlets.Lib.Gtk
   ( gtkHapplet, gtkAnimationFrameRate, GtkGUI,
     GtkWindow, gtkLaunchEventLoop,
-    GtkImage,
+    CairoPixelBuffer,
     -- * Cairo Wrapper Functions
     -- | Functions that allow you to call directly into a "Graphics.Rendering.Cairo".'Cairo.Render'
     -- function, but using point, line, and color values specified in the "Happlets.Draw"
@@ -42,16 +42,18 @@ import           Control.Exception
 
 import           Data.Array.MArray
 import           Data.Bits
+import qualified Data.Vector.Unboxed as UVec
 import           Data.IORef
-import qualified Data.Map          as Map
+import qualified Data.Map            as Map
 import           Data.Maybe
-import qualified Data.Text         as Strict
+import qualified Data.Text           as Strict
 import           Data.Time.Clock
 import           Data.Word
 
 import           Foreign.Storable
 
 import qualified Graphics.Rendering.Cairo           as Cairo
+import qualified Graphics.Rendering.Cairo.Matrix    as Cairo
 
 import qualified Graphics.UI.Gtk.Abstract.Container as Gtk
 import qualified Graphics.UI.Gtk.Abstract.Widget    as Gtk
@@ -216,7 +218,7 @@ gtkAnimationFrameRate = 30.0
 -- The 'Controller' type is defined to use the 'CairoRender' as it's @view@ type. You can also
 -- convert a 'GtkCairoDiagram' to a 'CairoRender' using the 'gtkCairoDiagram' function.
 newtype CairoRender a = CairoRender (StateT CairoRenderState Cairo.Render a)
-  deriving (Functor, Applicative, Monad, MonadIO)
+  deriving (Functor, Applicative, Monad, MonadIO, MonadState CairoRenderState)
 
 instance Semigroup a => Semigroup (CairoRender a) where
   (CairoRender a) <> (CairoRender b) = CairoRender $ (<>) <$> a <*> b
@@ -233,10 +235,37 @@ data CairoRenderMode
   = VectorMode
   | RasterMode !(V2 Double) !(V2 Double)
 
+data CairoGeometry n
+  = CairoGeometry
+    { theCairoShape         :: !(Draw2DShape n)
+    , theCairoLineWidth     :: !(LineWidth n)
+    , theCairoBlitTransform :: !(Transform2D n)
+    }
+
+instance Map2DShape CairoGeometry where
+  map2DShape f geom = CairoGeometry
+    { theCairoShape         = map2DShape f $ theCairoShape geom
+    , theCairoLineWidth     = f $ theCairoLineWidth geom
+    , theCairoBlitTransform = fmap (fmap f) $ theCairoBlitTransform geom
+    }
+
+cairoShape :: Lens' (CairoGeometry n) (Draw2DShape n)
+cairoShape = lens theCairoShape $ \ a b -> a{ theCairoShape = b }
+
+cairoLineWidth :: Lens' (CairoGeometry n) (LineWidth n)
+cairoLineWidth = lens theCairoLineWidth $ \ a b -> a{ theCairoLineWidth = b }
+
+cairoBlitTransform :: Lens' (CairoGeometry n) (Transform2D n)
+cairoBlitTransform = lens theCairoBlitTransform $ \ a b -> a{ theCairoBlitTransform = b }
+
 data CairoRenderState
   = CairoRenderState
     { theCairoKeepWinSize        :: !PixSize
-    , theCanvasResizeMode        :: !CanvasMode
+    , theCanvasResizeMode        :: !CanvasResizeMode
+    , theCanvasFillColor         :: !PaintSource
+    , theCanvasStrokeColor       :: !PaintSource
+    , theCairoGeometry           :: !(CairoGeometry Double)
+    , theCairoClipRect           :: !(Rect2D SampCoord)
     , theCairoRenderMode         :: !CairoRenderMode
     , theCairoScreenPrinterState :: !ScreenPrinterState
     }
@@ -244,13 +273,22 @@ data CairoRenderState
 cairoKeepWinSize :: Lens' CairoRenderState PixSize
 cairoKeepWinSize = lens theCairoKeepWinSize $ \ a b -> a{ theCairoKeepWinSize = b }
 
---cairoRenderFontStyle :: Lens' CairoRenderState FontStyle
---cairoRenderFontStyle = lens theCairoRenderFontStyle $ \ a b -> a{ theCairoRenderFontStyle = b }
+canvasFillColor :: Lens' CairoRenderState PaintSource
+canvasFillColor = lens theCanvasFillColor $ \ a b -> a{ theCanvasFillColor = b }
+
+canvasStrokeColor :: Lens' CairoRenderState PaintSource
+canvasStrokeColor = lens theCanvasStrokeColor $ \ a b -> a{ theCanvasStrokeColor = b }
+
+cairoGeometry :: Lens' CairoRenderState (CairoGeometry Double)
+cairoGeometry = lens theCairoGeometry $ \ a b -> a{ theCairoGeometry = b }
+
+cairoClipRect :: Lens' CairoRenderState (Rect2D SampCoord)
+cairoClipRect = lens theCairoClipRect $ \ a b -> a{ theCairoClipRect = b }
 
 cairoRenderMode :: Lens' CairoRenderState CairoRenderMode
 cairoRenderMode = lens theCairoRenderMode $ \ a b -> a{ theCairoRenderMode = b }
 
-canvasResizeMode :: Lens' CairoRenderState CanvasMode
+canvasResizeMode :: Lens' CairoRenderState CanvasResizeMode
 canvasResizeMode = lens theCanvasResizeMode $ \ a b -> a{ theCanvasResizeMode = b }
 
 cairoScreenPrinterState :: Lens' CairoRenderState ScreenPrinterState
@@ -604,8 +642,16 @@ createWin cfg = do
         , theGtkEventBox           = eventBox
         , theCairoRenderState      = CairoRenderState
             { theCairoKeepWinSize        = V2 0 0
-            , theCanvasResizeMode        = ClearCanvasMode
+            , theCanvasResizeMode        = CanvasResizeClear
             , theCairoRenderMode         = VectorMode
+            , theCanvasFillColor         = PaintSolidColor white
+            , theCanvasStrokeColor       = PaintSolidColor black
+            , theCairoGeometry           = CairoGeometry
+                { theCairoShape = Draw2DReset
+                , theCairoLineWidth = 0
+                , theCairoBlitTransform = identity
+                }
+            , theCairoClipRect = rect2D
             , theCairoScreenPrinterState = screenPrinterState
             }
         , theAudioPlaybackThread   = StereoPlaybackThread Nothing audio
@@ -999,7 +1045,8 @@ evalCairoOnCanvas redraw = do
       let cairoRenderer = logSubIO logIO _drawevt "Gtk.renderWithDrawable onCanvas" .
             Gtk.renderWithDrawable (theGtkPixmap livest)
 #endif
-      (a, rendst) <- cairoRenderer $
+      (a, rendst) <- cairoRenderer $ do
+        cairoResetAntialiasing
         runCairoRender (sampCoord <$> V2 w h) (env ^. cairoRenderState) redraw
       region <- Gtk.regionRectangle $ Gtk.Rectangle 0 0 w h -- TODO: minimize the size of this region
       exposeEventHandler logIO (gtkDrawWindow livest) region livest
@@ -1071,17 +1118,19 @@ instance HappletWindow GtkWindow CairoRender where
   onOSBuffer                =
     liftGtkStateIntoGUI _drawevt "onOSBuffer". evalCairoOnGtkDrawable
 
-  pushWindowClipRegion rect = onCanvas $ cairoRender $ do
-    Cairo.save
-    let head = rect ^. rect2DHead
-    let tail = rect ^. rect2DTail
-    let (x, y) = head ^. pointXY
-    let (w, h) = (tail - head) ^. pointXY
-    let f (SampCoord x) = realToFrac x
-    Cairo.rectangle (f x) (f y) (f w) (f h)
-    Cairo.clip
-
-  popWindowClipRegion       = onCanvas $ cairoRender $ Cairo.restore
+  windowClipRegion          = Variable
+    { setVal = onCanvas . cairoRender . \ case
+        Nothing   -> Cairo.restore
+        Just rect -> do
+          Cairo.save
+          let head = rect ^. rect2DHead
+          let tail = rect ^. rect2DTail
+          let (x, y) = head ^. pointXY
+          let (w, h) = (tail - head) ^. pointXY
+          let f (SampCoord x) = realToFrac x
+          Cairo.rectangle (f x) (f y) (f w) (f h)
+          Cairo.clip
+    }
 
   refreshRegion rects       = liftGtkStateIntoGUI _drawevt "refreshRegion" $ do
     logIO <- mkLogger "refreshRegion"
@@ -1108,14 +1157,57 @@ instance HappletWindow GtkWindow CairoRender where
           Cairo.paint
 
 instance Happlet2DGraphics CairoRender where
+  pixel p0 = let p@(V2 x y) = realToFrac <$> p in Variable
+    { setVal = \ color -> do
+        rasterMode x y
+        cairoRender $ cairoSetPoint (V2 x y) color
+    , getVal = cairoRender (cairoFlush >> cairoGetPoint (V2 x y))
+    }
+
+  tempContext = cairoPreserve
+
+  resetGraphicsContext = cairoRender $ do
+    cairoFlush
+    Cairo.setOperator Cairo.OperatorSource
+    cairoResetAntialiasing
+
+  fill = cairoDrawWithSource canvasFillColor Cairo.fill
+
+  stroke = cairoDrawWithSource canvasStrokeColor Cairo.stroke
+
+  blitOperator = Variable
+    { setVal = cairoRender . Cairo.setOperator . \ case
+        BlitSource   -> Cairo.OperatorSource
+        BlitOver     -> Cairo.OperatorOver
+        BlitXOR      -> Cairo.OperatorXor
+        BlitAdd      -> Cairo.OperatorAdd
+        BlitSaturate -> Cairo.OperatorSaturate
+    , getVal = cairoRender $ Cairo.getOperator >>= \ case
+        Cairo.OperatorSource   -> return BlitSource
+        Cairo.OperatorOver     -> return BlitOver
+        Cairo.OperatorXor      -> return BlitXOR
+        Cairo.OperatorAdd      -> return BlitAdd
+        Cairo.OperatorSaturate -> return BlitSaturate
+        op -> fail $ "Using a Cairo blit operator not known to Happlets: "++show op
+    }
+
+  fillColor = variableFromLens canvasFillColor
+
+  strokeColor = variableFromLens canvasStrokeColor
+
+  clipRegion = Variable
+    { setVal = \ rect -> do
+        cairoClipRect .= rect
+        cairoRender $ Cairo.resetClip >> cairoRectangle (toRational <$> rect) >> Cairo.clip
+    , getVal = use cairoClipRect
+    }
+
   clearScreen = unpackRGBA32Color >>> \ (r,g,b,a) -> cairoRender $ cairoClearCanvas r g b a
-  drawLine a b c   = vectorMode >> cairoRender (cairoDrawLine a b c)
-  drawPath a b c   = vectorMode >> cairoRender (cairoDrawPath a b c)
-  drawRect a b c d = vectorMode >> cairoRender (cairoDrawRect a b c d)
-  getPoint a       = cairoRender (cairoFlush >> cairoGetPoint a)
-  setPoint a@(V2 x y) b = do
-    rasterMode (realToFrac x) (realToFrac y)
-    cairoRender (cairoSetPoint a b)
+
+instance Happlet2DGeometry CairoRender Double where
+  shape         = variableFromLens (cairoGeometry . cairoShape)
+  strokeWeight  = variableFromLens (cairoGeometry . cairoLineWidth)
+  blitTransform = variableFromLens (cairoGeometry . cairoBlitTransform)
 
 instance RenderText CairoRender where
   getRendererFontStyle = CairoRender $ use $ cairoScreenPrinterState . fontStyle
@@ -1267,6 +1359,11 @@ cairoGetPoint pt = cairoArray $ \ w h surfaceData ->
 cairoFlush :: Cairo.Render ()
 cairoFlush = Cairo.withTargetSurface Cairo.surfaceFlush
 
+cairoResetAntialiasing :: Cairo.Render ()
+cairoResetAntialiasing = do
+  Cairo.setAntialias Cairo.AntialiasNone
+  Cairo.setTolerance 1.0
+
 -- | Force a single pixel at a given location to change to the given color.
 cairoSetPoint :: RealFrac n => Point2D n -> Color -> Cairo.Render ()
 cairoSetPoint pt = get32BitsARGB >>> \ w32 -> cairoArray $ \ w h surfaceData ->
@@ -1289,6 +1386,32 @@ cairoSetColor = unpackRGBA32Color >>> \ (r,g,b,a) -> Cairo.setSourceRGBA r g b a
 -- function. When evaluation completes, pop the graphics context by calling 'Cairo.restore'.
 cairoPreserve :: CairoRender a -> CairoRender a
 cairoPreserve f = cairoRender Cairo.save >> f <* cairoRender Cairo.restore
+
+cairoGradStops :: Cairo.Pattern -> [GradientStop] -> Cairo.Render ()
+cairoGradStops pat = mapM_ $ \ stop -> do
+  let (r,g,b,a) = unpackRGBA32Color $ stop ^. gradStopColor
+  Cairo.patternAddColorStopRGBA pat (stop ^. gradStopPoint) r g b a
+
+m44toCairoMatrix :: RealFrac n => Transform2D n -> Cairo.Matrix
+m44toCairoMatrix m0 = let (V2 (V2 xx yx) (V2 xy yy)) = fmap realToFrac <$> (m0 ^. _m22) in
+  Cairo.Matrix xx yx xy yy 0 0
+
+cairoDrawWithSource :: Lens' CairoRenderState PaintSource -> Cairo.Render () -> CairoRender ()
+cairoDrawWithSource paint draw = do
+  use paint >>= cairoRender . \ case
+    PaintSolidColor    color           -> cairoSetColor color
+    PaintGradient gtyp start end stops -> case gtyp of
+      GradRadial (V2 x1 y1) (Magnitude r1) (V2 x2 y2) (Magnitude r2) -> let f = realToFrac in
+        Cairo.withRadialPattern (f x1) (f y1) (f r1) (f x2) (f y2) (f r2) $ \ pat -> do
+          cairoGradStops pat $
+            GradientStop 0.0 start : gradStopsToList stops ++ [GradientStop 1.0 end]
+  geom <- use cairoGeometry
+  vectorMode
+  cairoRender $ do
+    Cairo.setLineWidth $ geom ^. cairoLineWidth
+    Cairo.setMatrix $ m44toCairoMatrix $ geom ^. cairoBlitTransform
+    cairoDrawShape $ geom ^. cairoShape
+    draw
 
 -- | Move the position of the cairo graphics context "pen" object.
 cairoMoveTo :: RealFrac n => Point2D n -> Cairo.Render ()
@@ -1329,23 +1452,59 @@ cairoDrawPath color width =
         Cairo.stroke
   in  \ case { [] -> return (); [a] -> run a [a]; a:ax -> run a ax; }
 
-cairoDrawRect
-  :: (RealFrac n, RealFrac lw)
-  => LineColor -> LineWidth lw -> FillColor -> Rect2D n -> Cairo.Render ()
-cairoDrawRect lineColor width fillColor rect = do
-  cairoSetColor fillColor
+cairoRectangle :: RealFrac n => Rect2D n -> Cairo.Render ()
+cairoRectangle rect = do
   cairoMoveTo $ rect ^. rect2DHead
   let (head, tail) = (realToFrac <$> canonicalRect2D rect) ^. rect2DPoints
   let (x, y) = head ^. pointXY
   let (w, h) = (tail - head) ^. pointXY
   Cairo.rectangle x y w h
+
+cairoDrawRect
+  :: (RealFrac n, RealFrac lw)
+  => LineColor -> LineWidth lw -> FillColor -> Rect2D n -> Cairo.Render ()
+cairoDrawRect lineColor width fillColor rect = do
+  cairoSetColor fillColor
+  cairoRectangle rect
   Cairo.fill
   when (width > 0.0) $ do
     cairoSetColor lineColor
     Cairo.setLineWidth $ realToFrac width
     Cairo.setLineJoin Cairo.LineJoinMiter
-    Cairo.rectangle x y w h
+    cairoRectangle rect
     Cairo.stroke
+
+cairoArc :: RealFrac n => Arc2D n -> Cairo.Render ()
+cairoArc arc0 = do
+  let arc = realToFrac <$> arc0
+  let (V2 x y) = arc ^. arc2DOrigin
+  let (Magnitude r) = arc ^. arc2DRadius
+  let (Angle start) = arc ^. arc2DStart
+  let (Angle   end) = arc ^. arc2DEnd
+  Cairo.arc x y r start end
+
+cairoPath :: (UVec.Unbox n, RealFrac n) => Path2D n -> Cairo.Render ()
+cairoPath = path2DPoints >>> \ (init, points) -> do
+  cairoMoveTo init
+  forM_ points cairoLineTo
+
+cairoCubic :: (UVec.Unbox n, RealFrac n) => Cubic2D n -> Cairo.Render ()
+cairoCubic = cubic2DPoints >>> \ (init, segments) -> do
+  cairoMoveTo init
+  forM_ (fmap realToFrac <$> segments) $ \ seg -> do
+    let (V2 ctrl1X ctrl1Y) = seg ^. cubic2DCtrlPt1
+    let (V2 ctrl2X ctrl2Y) = seg ^. cubic2DCtrlPt2
+    let (V2   endX   endY) = seg ^. cubic2DEndPoint
+    Cairo.curveTo ctrl1X ctrl1Y ctrl2X ctrl2Y endX endY
+
+cairoDrawShape :: (UVec.Unbox n, RealFrac n) => Draw2DShape n -> Cairo.Render ()
+cairoDrawShape = \ case
+  Draw2DReset -> return ()
+  Draw2DLine (Line2D from to) -> cairoMoveTo from >> cairoLineTo to
+  Draw2DRect  rect -> cairoRectangle rect
+  Draw2DArc   arc  -> cairoArc arc
+  Draw2DPath  path -> cairoPath path
+  Draw2DCubic path -> cairoCubic path
 
 -- | This is a helpful function you can use for your 'Happlet.Control.controlRedraw' function to clear
 -- the window with a background color, given by the four 'Prelude.Double' parameters for Red, Green,
@@ -1961,8 +2120,8 @@ gdkBlit canvas pixmap (V2 dx dy)  = do
 
 -- | This data type contains a pointer to an image buffer in memory, and also a function used to
 -- perform some drawing to the pixel values.
-data GtkImage
-  = GtkImage
+data CairoPixelBuffer
+  = CairoPixelBuffer
     {
 #if USE_CAIRO_SURFACE_BUFFER
       gtkCairoSurfaceMVar :: MVar Cairo.Surface
@@ -1971,7 +2130,7 @@ data GtkImage
 #endif
     }
 
-instance CanBufferImages GtkWindow GtkImage CairoRender where
+instance CanBufferPixels GtkWindow CairoRender CairoPixelBuffer where
 #if USE_CAIRO_SURFACE_BUFFER
   newImageBuffer size@(V2 w h) draw = liftGtkStateIntoGUI _drawevt "newImageBuffer" $ do
     rendst <- use cairoRenderState
@@ -1982,11 +2141,11 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
       (a, rendst) <- logSubIO logIO _drawevt "Cairo.renderWith newImageBuffer" $
         Cairo.renderWith surface $ runCairoRender size rendst draw
       mvar <- newMVar surface
-      return (a, rendst, GtkImage{gtkCairoSurfaceMVar=mvar})
+      return (a, rendst, CairoPixelBuffer{gtkCairoSurfaceMVar=mvar})
     cairoRenderState .= rendst
     return (a, img)
 
-  resizeImageBuffer (GtkImage{gtkCairoSurfaceMVar=mvar}) size@(V2 w h) draw =
+  resizeImageBuffer (CairoPixelBuffer{gtkCairoSurfaceMVar=mvar}) size@(V2 w h) draw =
     liftGtkStateIntoGUI _drawevt ("resizeImageBuffer ("++show size++")") $ do
       rendst <- use cairoRenderState
       (a, rendst) <- liftIO $ do
@@ -2006,7 +2165,7 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
       cairoRenderState .= rendst
       return a
 
-  drawImage (GtkImage{gtkCairoSurfaceMVar=mvar}) draw = liftGtkStateIntoGUI _drawevt "drawImage" $ do
+  drawImage (CairoPixelBuffer{gtkCairoSurfaceMVar=mvar}) draw = liftGtkStateIntoGUI _drawevt "drawImage" $ do
     rendst <- use cairoRenderState
     (a, rendst) <- liftIO $ do
       logIO <- mkLogger "drawImage"
@@ -2019,35 +2178,6 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
     cairoRenderState .= rendst
     return a
 
-  blitImage (GtkImage{gtkCairoSurfaceMVar=mvar}) offset = liftGtkStateIntoGUI _drawevt "blitImage" $ do
-    logIO <- mkLogger "blitImage"
-    liveMVar <- gets gtkWindowLive
-    liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" liveMVar $ \ liveEnv ->
-      logSubIO logIO _drawevt "modifyMVar gtkCairoSurfaceMVar" $
-        logWithMVar logIO _drawevt "gtkCairoSurfaceMVar" mvar $ \ surface ->
-          logSubIO logIO _drawevt "Cairo.renderWith blitImage" $
-            Cairo.renderWith (theCairoSurface liveEnv) $ do
-              let (V2 x y) = realToFrac <$> offset
-              liftIO $ logIO _drawevt $
-                unwords ["Cairo.setSourceSurface", show x, show y, ">> Cairo.paint"]
-              Cairo.setOperator Cairo.OperatorSource
-              Cairo.setSourceSurface surface x y
-              Cairo.paint
-
-  blitImageTo (GtkImage{gtkCairoSurfaceMVar=src}) (GtkImage{gtkCairoSurfaceMVar=targ}) offset =
-    liftGtkStateIntoGUI _drawevt "blitImageTo" $ liftIO $
-      if src == targ then error "cannot blit image to itself" else do
-        logIO <- mkLogger "blitImageTo"
-        logWithMVar logIO _drawevt "blitSource" src $ \ src ->
-          logWithMVar logIO _drawevt "blitTarget" targ $ \ targ ->
-            logSubIO logIO _drawevt "Cairo.renderWith blitImageTo" $ Cairo.renderWith targ $ do
-              let (V2 x y) = realToFrac <$> offset
-              liftIO $ logIO _drawevt $ unwords
-                ["Cairo.setSourceSurface", show x, show y, ">> Cairo.paint"]
-              Cairo.setOperator Cairo.OperatorSource
-              Cairo.setSourceSurface src x y
-              Cairo.paint
-
 #else
   newImageBuffer  (V2 (SampCoord w) (SampCoord h)) draw = liftIO $ do
     logIO <- mkLogger "newImageBuffer"
@@ -2057,11 +2187,11 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
     logSubIO _drawevt "Gtk.renderWithDrawable newImageBuffer" $
       Gtk.renderWithDrawable pixmap $ runCairoRender draw
     mvar <- newMVar pixmap
-    return GtkImage
+    return CairoPixelBuffer
       { gtkPixmapMVar = mvar
       }
 
-  resizeImageBuffer (GtkImage{gtkPixmapMVar=mvar}) (V2 w h) draw = do
+  resizeImageBuffer (CairoPixelBuffer{gtkPixmapMVar=mvar}) (V2 w h) draw = do
     logIO <- mkLogger "resizeImageBuffer"
     liftIO $ logModMVar logIO _drawevt mvar $ \ pixmap -> do
       logIO _drawevt $ unwords ["Gtk.pixmapNew", show w, show h]
@@ -2070,22 +2200,11 @@ instance CanBufferImages GtkWindow GtkImage CairoRender where
         Gtk.renderWithDrawable pixmap $ runCairoRender draw
       return (pixmap, a)
 
-  drawImage (GtkImage{gtkPixmapMVar=mvar}) draw = do
+  drawImage (CairoPixelBuffer{gtkPixmapMVar=mvar}) draw = do
     logIO <- mkLogger "drawImage"
     liftIO $ logWithMVar logIO _drawevt mvar $
       logIO _drawevt "Gtk.renderWithDrawable drawImage" .
       flip Gtk.renderWithDrawable (runCairoRender draw)
-
-  blitImage (GtkImage{gtkPixmapMVar=mvar}) offset = liftGtkStateIntoGUI $ do
-    logIO <- mkLogger "blitImage"
-    gtkwin <- gets gtkWindow
-    canvas <- liftIO $ Gtk.widgetGetDrawWindow gtkwin
-    liftIO $ logWithMVar logIO _drawevt mvar $ \ pixmap -> gdkBlit canvas pixmap offset
-
-  blitImageTo (GtkImage{gtkPixmapMVar=src}) (GtkImage{gtkPixmapMVar=targ}) offset = do
-    logIO <- mkLogger "blitImageTo"
-    liftIO $ logWithMVar logIO _drawevt src $ \ src -> logWithMVar logIO _drawevt targ $ \ targ ->
-      gdkBlit targ src offset
 #endif
 
 --  -- | Convert a 'GtkCairoDiagram', which is a type of 'Diagrams.Core.Types.Diagram', and convert it
