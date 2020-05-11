@@ -4,7 +4,7 @@
 -- implementation. Creating a window automatically calls the the Gtk+ initializer. Use
 -- 'newGtkWindow' to create a new window, and any of the "Happlet.World" functinos to manipulate the
 -- windows. This module re-exports the "Happlets" module so it is not necessary to import both.
-module Happlets.Lib.Gtk
+module Happlets.Provider.Gtk2
   ( gtkHapplet, gtkAnimationFrameRate, GtkGUI,
     GtkWindow, gtkLaunchEventLoop,
     CairoPixelBuffer,
@@ -32,9 +32,13 @@ module Happlets.Lib.Gtk
 ----------------------------------------------------------------------------------------------------
 
 import           Happlets
-import           Happlets.Audio
-import           Happlets.Draw
+import           Happlets.Model.Audio
+import           Happlets.Model.GUI
+import           Happlets.View
 import           Happlets.Provider
+import           Happlets.Provider.Cairo      hiding (mkLogger)
+import           Happlets.Provider.ALSA       hiding (mkLogger)
+import           Happlets.Provider.Gtk2.Debug
 
 import           Control.Arrow
 import           Control.Concurrent
@@ -49,8 +53,6 @@ import           Data.Maybe
 import qualified Data.Text           as Strict
 import           Data.Time.Clock
 import           Data.Word
-
-import           Foreign.Storable
 
 import qualified Graphics.Rendering.Cairo           as Cairo
 import qualified Graphics.Rendering.Cairo.Matrix    as Cairo
@@ -68,21 +70,6 @@ import qualified Graphics.UI.Gtk.General.General    as Gtk
 import qualified Graphics.UI.Gtk.Misc.EventBox      as Gtk
 import qualified Graphics.UI.Gtk.Windows.Window     as Gtk
 
-#if ! USE_CAIRO_SURFACE_BUFFER
-import qualified Graphics.UI.Gtk.Gdk.GC             as Gtk
-import qualified Graphics.UI.Gtk.Gdk.Pixmap         as Gtk
-#endif
-
-import qualified Sound.ALSA.PCM     as Linux
-import qualified Sound.Frame.Stereo as Stereo
-
---import           Diagrams.Backend.Cairo.Internal
---import           Diagrams.BoundingBox
---import           Diagrams.Core.Compile
---import           Diagrams.Core.Types              (Diagram)
---import           Diagrams.Size                    (dims)
-
---import           Linear.Affine
 import           Linear.V2 (V2(..))
 
 import           System.IO
@@ -104,233 +91,19 @@ import           Debug.Trace
 debugThisModule :: DebugTag
 debugThisModule  = mempty
 
-------------------
-
--- Debug function selection tags
-_mousevt, _keyevt, _animevt, _notanimevt, _drawevt, _audioevt, _textevt, _winevt, _ctxevt,
-  _setup, _locks, _infra, _workers, _fulldebug, _allbutanim, _nonverbose,
-  _miscA, _miscB, _exceptn, _allevt :: DebugTag
-
-_mousevt    = DebugTag 0x00000001 -- only mouse events
-_keyevt     = DebugTag 0x00000002 -- only key events
-_animevt    = DebugTag 0x00000004 -- only animation events
-_drawevt    = DebugTag 0x00000008 -- only redraw events
-_textevt    = DebugTag 0x00000010 -- only screen printer events
-_audioevt   = DebugTag 0x00000020 -- only audio events
-_ctxevt     = DebugTag 0x00000100 -- only context switching events
-_winevt     = DebugTag 0x00000200 -- window manager related events
-_allevt     = _mousevt <> _keyevt <> _animevt <> _drawevt <> _audioevt <>
-              _textevt <> _winevt <> _ctxevt
-_notanimevt = _exclude _animevt _allevt -- all events but animation/audio events
-_locks      = DebugTag 0x00010000 -- MVar locking and unlocking  -- WARNING: extremely verbose!!!
-_infra      = DebugTag 0x00020000 -- the callback infrastructure -- WARNING: extremely verbose!!!
-_setup      = DebugTag 0x00040000
-_exceptn    = DebugTag 0x04000000 -- is always set, used to print errors in exception handlers
-_workers    = DebugTag 0x08000000 -- when evaluating a 'Worker' thread (can be very verbose)
-_miscA      = DebugTag 0x01000000 -- is used to temporarily force a debug message
-_miscB      = DebugTag 0x02000000 -- is used to temporarily force a debug message
-_fulldebug  = _setup <> _allevt <> _locks <> _infra <> _exceptn <> _workers <> _miscA <> _miscB
-_allbutanim = _exclude _animevt _fulldebug
-_nonverbose = _exclude (_animevt <> _infra <> _locks <> _workers) _fulldebug
-
--- Two miscelanea tags are provided, '_miscA' and '_miscB'. When looking through the source code in
--- this file, if you find a debug logging function that you want to force to output, even if it's
--- ordinary tag is not selected, edit the source code on that log function to match one of the
--- miscelanea tags. For example, if you want to report on all calls to 'Cairo.renderWith' but not
--- report on any of the other '_drawevt' tags, then wherever there is a @(logIO _drawevt)@
--- function reporting on the call of of 'Cairo.renderWith', change the tag to
--- @(logIO (_drawevt<>_miscA))@ and then set 'debugThisModule' to '_miscA'.
-
-newtype DebugTag = DebugTag Word32 deriving (Eq, Bits)
-instance Semigroup DebugTag where { (<>) = (.|.); }
-instance Monoid DebugTag where { mempty = DebugTag 0; mappend = (<>); }
-
--- | Exclude A from B
-_exclude :: DebugTag -> DebugTag -> DebugTag
-_exclude excluded selector = selector .&. complement excluded
-
-----------------------------------------------------------------------------------------------------
-
-type Log m = DebugTag -> String -> m ()
-
-newtype CaughtException = CaughtException SomeException
-deriving instance Show CaughtException
-instance Exception CaughtException
-
 mkLogger
   :: (Monad m, MonadIO m)
   => String -> m (Log IO)
-mkLogger func = return $ \ sel msg -> if sel .&. debugThisModule == mempty then return () else do
+mkLogger func = return $ \ sel msg ->
+  if sel .&. Happlets.Provider.Gtk2.debugThisModule == mempty then return () else do
   tid <- myThreadId
   traceM $ '[':show tid++"][Happlets.Lib.Gtk."++func++']':msg
 {-# INLINE mkLogger #-}
-
-logSubIO :: Log IO -> DebugTag -> String -> IO a -> IO a
-logSubIO logIO sel msg f = catches
-  (logIO sel ("[BEGIN] "++msg) >> f <* logIO sel ("[ END ] "++msg))
-  [ Handler $ \ (CaughtException e) -> throw e
-  , Handler $ \ some@(SomeException e) -> do
-      logIO _exceptn (msg++' ':show e) >>= evaluate
-      throw (CaughtException some)
-  ]
-{-# INLINE logSubIO #-}
 
 logSubGtk :: Log IO -> DebugTag -> String -> GtkState a -> GtkState a
 logSubGtk logIO sel msg f = get >>=
   liftIO . logSubIO logIO sel msg . runGtkState f >>= state . const
 {-# INLINE logSubGtk #-}
-
-logModMVar :: Log IO -> DebugTag -> String -> MVar a -> (a -> IO (a, b)) -> IO b
-logModMVar logIO sel label mvar =
-  logSubIO logIO (_locks<>sel) ("modifyMVar "++label) . modifyMVar mvar
-{-# INLINE logModMVar #-}
-
-logModMVar_ :: Log IO -> DebugTag -> String -> MVar a -> (a -> IO a) -> IO ()
-logModMVar_ logIO sel label mvar =
-  logSubIO logIO (_locks<>sel) ("modifyMVar_ "++label) . modifyMVar_ mvar
-{-# INLINE logModMVar_ #-}
-
-logWithMVar :: Log IO -> DebugTag -> String -> MVar a -> (a -> IO b) -> IO b
-logWithMVar logIO sel label mvar =
-  logSubIO logIO (_locks<>sel) ("withMVar "++label) . withMVar mvar
-{-# INLINE logWithMVar #-}
-
-----------------------------------------------------------------------------------------------------
-
-#if ! USE_CAIRO_SURFACE_BUFFER
-dToW16 :: Double -> Word16
-dToW16 = round . (*) (realToFrac (maxBound::Word16))
-
-dToGrey :: Double -> Gtk.Color
-dToGrey d = Gtk.Color (dToW16 d) (dToW16 d) (dToW16 d)
-#endif
-
--- | This is the frame rate used by default when installing an animation event handler. This value
--- can be configured by modifying the 'Happlets.Config.animationFrameRate'.
-gtkAnimationFrameRate :: Double
-gtkAnimationFrameRate = 30.0
-
-----------------------------------------------------------------------------------------------------
-
--- | A monadic wrapper around a 'Cario.Render' monad. The only reason for this to exist is because
--- there needs to be an instance of 'Data.Semigroup.Semigroup'.
---
--- The 'Controller' type is defined to use the 'CairoRender' as it's @view@ type. You can also
--- convert a 'GtkCairoDiagram' to a 'CairoRender' using the 'gtkCairoDiagram' function.
-newtype CairoRender a = CairoRender (StateT CairoRenderState Cairo.Render a)
-  deriving (Functor, Applicative, Monad, MonadIO, MonadState CairoRenderState)
-
-instance Semigroup a => Semigroup (CairoRender a) where
-  (CairoRender a) <> (CairoRender b) = CairoRender $ (<>) <$> a <*> b
-
-instance Monoid a => Monoid (CairoRender a) where
-  mappend (CairoRender a) (CairoRender b) = CairoRender $ mappend <$> a <*> b
-  mempty = return mempty
-
--- | Mose Cairo commands work in 'VectorMode' where no special state is necessary. But the
--- 'Happlets.Draw.setPoint' and 'Happlets.Draw.getPoint' commands operate in 'RasterMode', where the
--- vector operations need to be flushed before beginning, and where the updated pixels need to be
--- marked before returning to 'VectorMode'.
-data CairoRenderMode
-  = VectorMode
-  | RasterMode !(V2 Double) !(V2 Double)
-
-data CairoGeometry n
-  = CairoGeometry
-    { theCairoShape         :: !(Draw2DShape n)
-    , theCairoLineWidth     :: !(LineWidth n)
-    , theCairoBlitTransform :: !(Transform2D n)
-    }
-
-instance Map2DShape CairoGeometry where
-  map2DShape f geom = CairoGeometry
-    { theCairoShape         = map2DShape f $ theCairoShape geom
-    , theCairoLineWidth     = f $ theCairoLineWidth geom
-    , theCairoBlitTransform = fmap (fmap f) $ theCairoBlitTransform geom
-    }
-
-cairoShape :: Lens' (CairoGeometry n) (Draw2DShape n)
-cairoShape = lens theCairoShape $ \ a b -> a{ theCairoShape = b }
-
-cairoLineWidth :: Lens' (CairoGeometry n) (LineWidth n)
-cairoLineWidth = lens theCairoLineWidth $ \ a b -> a{ theCairoLineWidth = b }
-
-cairoBlitTransform :: Lens' (CairoGeometry n) (Transform2D n)
-cairoBlitTransform = lens theCairoBlitTransform $ \ a b -> a{ theCairoBlitTransform = b }
-
-data CairoRenderState
-  = CairoRenderState
-    { theCairoKeepWinSize        :: !PixSize
-    , theCanvasResizeMode        :: !CanvasResizeMode
-    , theCanvasFillColor         :: !PaintSource
-    , theCanvasStrokeColor       :: !PaintSource
-    , theCairoGeometry           :: !(CairoGeometry Double)
-    , theCairoClipRect           :: !(Rect2D SampCoord)
-    , theCairoRenderMode         :: !CairoRenderMode
-    , theCairoScreenPrinterState :: !ScreenPrinterState
-    }
-
-cairoKeepWinSize :: Lens' CairoRenderState PixSize
-cairoKeepWinSize = lens theCairoKeepWinSize $ \ a b -> a{ theCairoKeepWinSize = b }
-
-canvasFillColor :: Lens' CairoRenderState PaintSource
-canvasFillColor = lens theCanvasFillColor $ \ a b -> a{ theCanvasFillColor = b }
-
-canvasStrokeColor :: Lens' CairoRenderState PaintSource
-canvasStrokeColor = lens theCanvasStrokeColor $ \ a b -> a{ theCanvasStrokeColor = b }
-
-cairoGeometry :: Lens' CairoRenderState (CairoGeometry Double)
-cairoGeometry = lens theCairoGeometry $ \ a b -> a{ theCairoGeometry = b }
-
-cairoClipRect :: Lens' CairoRenderState (Rect2D SampCoord)
-cairoClipRect = lens theCairoClipRect $ \ a b -> a{ theCairoClipRect = b }
-
-cairoRenderMode :: Lens' CairoRenderState CairoRenderMode
-cairoRenderMode = lens theCairoRenderMode $ \ a b -> a{ theCairoRenderMode = b }
-
-canvasResizeMode :: Lens' CairoRenderState CanvasResizeMode
-canvasResizeMode = lens theCanvasResizeMode $ \ a b -> a{ theCanvasResizeMode = b }
-
-cairoScreenPrinterState :: Lens' CairoRenderState ScreenPrinterState
-cairoScreenPrinterState = lens theCairoScreenPrinterState $ \ a b ->
-  a{ theCairoScreenPrinterState = b }
-
--- | Lift a @"Graphics.Rendering.Cairo".'Cairo.Render'@ function type into the 'CairoRender'
--- function type.
-cairoRender :: Cairo.Render a -> CairoRender a
-cairoRender = CairoRender . lift
-
--- | Extract a @"Graphics.Rendering.Cairo".'Cairo.Render'@ from a 'CairoRender' function type.
-runCairoRender
-  :: PixSize -> CairoRenderState -> CairoRender a -> Cairo.Render (a, CairoRenderState)
-runCairoRender winsize rendst (CairoRender render) =
-  flip runStateT (rendst & cairoKeepWinSize .~ winsize) $ do
-    style <- use $ cairoScreenPrinterState . fontStyle
-    lift $ cairoSetFontStyle True style style
-    render
-
--- | Switch to vector mode (only if it isn't already) which marks the surface as "dirty" in the
--- smallest possible rectangle containing all points. This function is called before every vector
--- operation.
-vectorMode :: CairoRender ()
-vectorMode = CairoRender $ use cairoRenderMode >>= \ case
-  VectorMode       -> return ()
-  RasterMode lo hi -> do
-    let (V2 loX loY) = round <$> lo
-        (V2 hiX hiY) = round <$> hi
-    lift $ Cairo.withTargetSurface $ \ surface ->
-      Cairo.surfaceMarkDirtyRectangle surface loX loY (hiX - loX + 1) (hiY - loY + 1)
-    cairoRenderMode .= VectorMode
-
--- | Switch to raster mode (only if it isn't already) which flushes all pending vector events. This
--- function is called before every raster operation.
-rasterMode :: Double -> Double -> CairoRender ()
-rasterMode x y = CairoRender $ use cairoRenderMode >>= \ case
-  RasterMode (V2 loX loY) (V2 hiX hiY) -> do
-    cairoRenderMode .= RasterMode (V2 (min loX x) (min loY y)) (V2 (max hiX x) (max hiY y))
-  VectorMode                           -> do
-    lift cairoFlush
-    cairoRenderMode .= RasterMode (V2 x y) (V2 x y)
 
 ----------------------------------------------------------------------------------------------------
 
@@ -539,16 +312,16 @@ liftGUIintoGtkState :: Happlet model -> GtkGUI model a -> GtkState (EventHandler
 liftGUIintoGtkState happlet f = do
   logIO <- mkLogger "liftGUIintoGtkState"
   -- (1) Always set 'contextSwitcher' to a no-op, it may be set to something else by @f@.
-  contextSwitcher .= return (EventHandlerContinue ())
+  Happlets.Provider.Gtk2.contextSwitcher .= return (EventHandlerContinue ())
   winst <- get
   (result, winst) <- liftIO $
     logSubIO logIO _locks "Lock Happlet, evaluate GUI function." $ 
       fmap fst $ onHapplet happlet $ \ model -> do
         (guiContin, guist) <- logSubIO logIO _infra "call runGUI" $ runGUI f GUIState
-          { theGUIHapplet = happlet
-          , theGUIWindow  = GtkLockedWin winst
-          , theGUIModel   = model
-          , theGUIWorkers = theGovernment winst
+          { theGUIHapplet  = happlet
+          , theGUIProvider = GtkLockedWin winst
+          , theGUIModel    = model
+          , theGUIWorkers  = theGovernment winst
           }
         case theGUIWindow guist of
           GtkLockedWin winst -> return ((guiContin, winst), theGUIModel guist)
@@ -563,7 +336,7 @@ liftGUIintoGtkState happlet f = do
   -- not been changed from the (return ()) value (a no-op) set at (1) and so no context switch
   -- occurs.
   case result of
-    EventHandlerCancel -> winst ^. contextSwitcher >>= \ case
+    EventHandlerCancel -> winst ^. Happlets.Provider.Gtk2.contextSwitcher >>= \ case
       EventHandlerFail msg -> do
         -- TODO: here, display error dialog box and halt program.
         fail $ Strict.unpack msg
@@ -600,7 +373,7 @@ liftGtkStateIntoGUI sel what f = do
     GtkLockedWin env -> do
       (a, env) <- liftIO $ logSubIO logIO (_infra<>sel) ("runGtkState "++what) $
         runGtkState f env
-      putGUIState $ gui{ theGUIWindow = GtkLockedWin env }
+      putGUIState $ gui{ theGUIProvider = GtkLockedWin env }
       return a
 
 -- | Create the window and install the permanent event handlers.
@@ -971,7 +744,7 @@ gtkSetHapplet newHapp init = do
   modifyGUIState $ \ guist -> case guist ^. guiWindow of
     GtkUnlockedWin{} -> error "gtkSetHapplet evaluated on unlocked window"
     GtkLockedWin env -> guist & guiWindow .~ GtkLockedWin
-      (env & contextSwitcher .~ gtkContextSwitch (env ^. detatchHandler) newHapp init)
+      (env & Happlets.Provider.Gtk2.contextSwitcher .~ gtkContextSwitch (env ^. detatchHandler) newHapp init)
   -- Then 'cancelNow' is called, immediately halting evaluation of this function. This ensures
   -- that the 'GUI' function context which called this 'gtkSetHapplet' function will be halted
   -- immediately and control will return to the 'liftGUIintoGtkState' function. It also ensures no
@@ -1020,7 +793,7 @@ gtkContextSwitch detatch newHapp init = do
         (guiContin, guist) <-
           logSubIO logIO _ctxevt "-- call new Happlet initializer for context switch" $
           runGUI (init $ sampCoord <$> uncurry V2 size) GUIState
-            { theGUIWindow  = GtkLockedWin env
+            { theGUIProvider = GtkLockedWin env
             , theGUIHapplet = newHapp
             , theGUIModel   = model
             , theGUIWorkers = theGovernment env
@@ -1098,457 +871,6 @@ exposeEventHandler logIO canvas region livest = do
 
 ----------------------------------------------------------------------------------------------------
 
-instance HappletWindow GtkWindow CairoRender where
-  getWindowSize             = liftGtkStateIntoGUI _drawevt "getWindowSize" $ do
-    logIO <- mkLogger "getWindowSize"
-    env <- get
-    liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
-      -- Obtain the size from the draw window, but will not draw to the draw window.
-      (w, h) <- Gtk.drawableGetSize (gtkDrawWindow livest)
-      return $ V2 (sampCoord w) (sampCoord h)
-
-  windowChangeHapplet       = gtkSetHapplet
-
-  changeEvents              = installEventHandler .
-    simpleSetup _ctxevt "changeEvents" detatchHandler . const
-
-  onCanvas                  =
-    liftGtkStateIntoGUI _drawevt "onCanvas"  . evalCairoOnCanvas
-
-  onOSBuffer                =
-    liftGtkStateIntoGUI _drawevt "onOSBuffer". evalCairoOnGtkDrawable
-
-  windowClipRegion          = Variable
-    { setVal = onCanvas . cairoRender . \ case
-        Nothing   -> Cairo.restore
-        Just rect -> do
-          Cairo.save
-          let head = rect ^. rect2DHead
-          let tail = rect ^. rect2DTail
-          let (x, y) = head ^. pointXY
-          let (w, h) = (tail - head) ^. pointXY
-          let f (SampCoord x) = realToFrac x
-          Cairo.rectangle (f x) (f y) (f w) (f h)
-          Cairo.clip
-    }
-
-  refreshRegion rects       = liftGtkStateIntoGUI _drawevt "refreshRegion" $ do
-    logIO <- mkLogger "refreshRegion"
-    env <- get
-    liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $ \ livest ->
-      logSubIO logIO _drawevt "Gtk.renderWithDrawable refreshRegion" $
-        Gtk.renderWithDrawable (gtkDrawWindow livest) $
-          forM_ (fmap realToFrac . canonicalRect2D <$> rects) $ \ rect -> do
-            Cairo.setOperator Cairo.OperatorSource
-            Cairo.setSourceSurface (theCairoSurface livest) (0.0) (0.0)
-            let (x, y) = (rect) ^. rect2DHead . pointXY
-            let (w, h) = ((rect ^. rect2DTail) - (rect ^. rect2DHead)) ^. pointXY
-            Cairo.rectangle x y w h
-            Cairo.fill
-
-  refreshWindow            = liftGtkStateIntoGUI _drawevt "refreshWindow" $ do
-    logIO <- mkLogger "refreshWindow"
-    env <- get
-    liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
-      logSubIO logIO _drawevt "Gtk.renderWithDrawable refreshWindow" $
-        Gtk.renderWithDrawable (gtkDrawWindow livest) $ do
-          Cairo.setOperator Cairo.OperatorSource
-          Cairo.setSourceSurface (theCairoSurface livest) (0.0) (0.0)
-          Cairo.paint
-
-instance Happlet2DGraphics CairoRender where
-  pixel p0 = let p@(V2 x y) = realToFrac <$> p in Variable
-    { setVal = \ color -> do
-        rasterMode x y
-        cairoRender $ cairoSetPoint (V2 x y) color
-    , getVal = cairoRender (cairoFlush >> cairoGetPoint (V2 x y))
-    }
-
-  tempContext = cairoPreserve
-
-  resetGraphicsContext = cairoRender $ do
-    cairoFlush
-    Cairo.setOperator Cairo.OperatorSource
-    cairoResetAntialiasing
-
-  fill = cairoDrawWithSource canvasFillColor Cairo.fill
-
-  stroke = cairoDrawWithSource canvasStrokeColor Cairo.stroke
-
-  blitOperator = Variable
-    { setVal = cairoRender . Cairo.setOperator . \ case
-        BlitSource   -> Cairo.OperatorSource
-        BlitOver     -> Cairo.OperatorOver
-        BlitXOR      -> Cairo.OperatorXor
-        BlitAdd      -> Cairo.OperatorAdd
-        BlitSaturate -> Cairo.OperatorSaturate
-    , getVal = cairoRender $ Cairo.getOperator >>= \ case
-        Cairo.OperatorSource   -> return BlitSource
-        Cairo.OperatorOver     -> return BlitOver
-        Cairo.OperatorXor      -> return BlitXOR
-        Cairo.OperatorAdd      -> return BlitAdd
-        Cairo.OperatorSaturate -> return BlitSaturate
-        op -> fail $ "Using a Cairo blit operator not known to Happlets: "++show op
-    }
-
-  fillColor = variableFromLens canvasFillColor
-
-  strokeColor = variableFromLens canvasStrokeColor
-
-  clipRegion = Variable
-    { setVal = \ rect -> do
-        cairoClipRect .= rect
-        cairoRender $ Cairo.resetClip >> cairoRectangle (toRational <$> rect) >> Cairo.clip
-    , getVal = use cairoClipRect
-    }
-
-  clearScreen = unpackRGBA32Color >>> \ (r,g,b,a) -> cairoRender $ cairoClearCanvas r g b a
-
-instance Happlet2DGeometry CairoRender Double where
-  shape         = variableFromLens (cairoGeometry . cairoShape)
-  strokeWeight  = variableFromLens (cairoGeometry . cairoLineWidth)
-  blitTransform = variableFromLens (cairoGeometry . cairoBlitTransform)
-
-instance RenderText CairoRender where
-  getRendererFontStyle = CairoRender $ use $ cairoScreenPrinterState . fontStyle
-  setRendererFontStyle newStyle = CairoRender $ do
-    oldStyle <- use $ cairoScreenPrinterState . fontStyle
-    newStyle <- lift $ cairoSetFontStyle False oldStyle newStyle
-    cairoScreenPrinterState . fontStyle .= newStyle
-    return newStyle
-
-  getGridCellSize = fmap realToFrac <$> getGridCellSizeDouble
-  getWindowTextGridSize = do
-    (V2 txtW txtH) <- getGridCellSizeDouble
-    (V2 winW winH) <- CairoRender $ use cairoKeepWinSize
-    return $ TextGridLocation
-      (TextGridRow    $ ceiling $ realToFrac winH / txtH)
-      (TextGridColumn $ ceiling $ realToFrac winW / txtW)
-    
-  gridLocationOfPoint = cairoGridLocationOfPoint . fmap realToFrac
-  gridLocationToPoint (TextGridLocation (TextGridRow row) (TextGridColumn col)) = do
-    off <- CairoRender $ use $ cairoScreenPrinterState . renderOffset
-    withCairoFontExtents $ \ fontWidth fontHeight ascent _descent -> off + V2
-      (realToFrac col * fontWidth + 1.5)
-      (fontHeight * realToFrac row + ascent + 0.5)
-
-  screenPrintNoAdvance = cairoPrintNoAdvance True
-  screenPrintCharNoAdvance = maybe (pure Nothing) (cairoPrintNoAdvance True) . printableChar
-
-  getStringBoundingBox = cairoPrintNoAdvance False
-  getCharBoundingBox = maybe (pure Nothing) (cairoPrintNoAdvance False) . printableChar
-
-  getScreenPrinterState = CairoRender $ use cairoScreenPrinterState
-  setScreenPrinterState st = CairoRender $ do
-    cairoScreenPrinterState .= st
-    logIO <- mkLogger "saveScreenPrinterState"
-    let (TextGridLocation (TextGridRow row) (TextGridColumn col)) = st ^. textCursor
-    liftIO $ logIO _textevt $ "row="++show row++", col="++show col
-
----- | TODO: obtain this value from Gtk, Glib, or Cairo.
---cairoGetDPI :: Cairo.Render Double
---cairoGetDPI = return 96.0
-
--- | Set a 'Happlets.Draw.Text.FontStyle' in the current 'Cairo.Render' context.
-cairoSetFontStyle :: Bool -> FontStyle -> FontStyle -> Cairo.Render FontStyle
-cairoSetFontStyle force oldStyle newStyle0 = do
-  logIO <- mkLogger "cairoSetFontStyle"
-  let newStyle = newStyle0 & fontSize %~ max 6.0 . min 600.0
-  let changed :: Eq a => (FontStyle -> a) -> Bool
-      changed getter = force || getter oldStyle /= getter newStyle
-  if changed theFontSize || changed theFontBold || changed theFontItalic
-   then do
-    when (changed theFontBold || changed theFontItalic) $ do
-      liftIO $ logIO _textevt $ "Cairo.selectFontFace \"monospace\" " ++
-        (if theFontItalic newStyle then "(italic)" else "(not italic)") ++
-        (if theFontBold   newStyle then "(bold)"   else "(not bold)")
-      Cairo.selectFontFace ("monospace" :: Strict.Text)
-        (if theFontItalic newStyle then Cairo.FontSlantItalic else Cairo.FontSlantNormal )
-        (if theFontBold   newStyle then Cairo.FontWeightBold  else Cairo.FontWeightNormal)
-    when (changed theFontSize) $ do
-      liftIO $ logIO _textevt $ "Cairo.setFontSize "++show (theFontSize newStyle)
-      Cairo.setFontSize $ theFontSize newStyle
-   else liftIO $ logIO _textevt
-          "-- fontSize, fontItalic, fontBold, values are all the same as before"
-  return newStyle
-
--- not for export
--- This does NOT evaluate 'spanPrintable' on the input 'String' so it must not be exported.
-cairoPrintNoAdvance :: Bool -> PrintableString -> CairoRender (Maybe TextBoundingBox)
-cairoPrintNoAdvance doDisplay = unwrapPrintable >>> \ str -> do
-  logIO <- mkLogger "cairoPrintNoAdvance"
-  st <- CairoRender $ use cairoScreenPrinterState
-  let style = theFontStyle st
-  let (TextGridLocation (TextGridRow row) (TextGridColumn col)) = theTextCursor st
-  (V2 gridW gridH) <- getGridCellSizeDouble
-  (V2 gridX gridY) <- gridLocationToPoint $ theTextCursor st
-  liftIO $ logIO _textevt
-    $ "cursor: row="++show row++", col="++show col
-    ++", gridW="++show gridW++", gridH="++show gridH
-    ++", gridX="++show gridX++", gridY="++show gridY
-  cairoRender $ do
-    ext <- Cairo.textExtents str
-    liftIO $ logIO _textevt $ "Xadvance="++show (Cairo.textExtentsXadvance ext)++
-      ", Yadvance="++show (Cairo.textExtentsYadvance ext)++
-      ", Ybearing="++show (Cairo.textExtentsYbearing ext)++
-      ", textWidth="++show (Cairo.textExtentsWidth ext)++
-      ", textHeight="++show (Cairo.textExtentsHeight ext)
-    let pt   = V2 (realToFrac col * gridW) (realToFrac row * gridH) + theRenderOffset st
-    let size = V2 (Cairo.textExtentsXadvance ext + 2.0) gridH
-    let rect = Rect2D pt (pt + size)
-    liftIO $ logIO _textevt $ "Cairo.textExtents -> " ++ show size ++ ", cursor=" ++ show pt
-    when doDisplay $ do
-      liftIO $ logIO _textevt $ "cairoDrawRect "
-        ++ show (theFontBackColor style)
-        ++ ' ' : show (rect ^. rect2DPoints) ++ " -- background"
-      cairoDrawRect (theFontBackColor style) (0::Double) (theFontBackColor style) rect
-      liftIO $ logIO _textevt $ "moveTo "
-        ++ show gridX       ++ ' ':show gridY
-        ++ " setColor "    ++ show (theFontForeColor style)
-        ++ " setFontSize " ++ show (theFontSize      style)
-      Cairo.moveTo gridX gridY
-      cairoSetColor $ theFontForeColor style
-      liftIO $ logIO _textevt $ "Cairo.showText "++show str
-      Cairo.showText str
-      Cairo.fill
-    return $ Just rect
-
-withCairoFontExtents :: (Double -> Double -> Double -> Double -> a) -> CairoRender a
-withCairoFontExtents f = do
-  logIO <- mkLogger "withCarioFontExtents"
-  ext <- CairoRender $ lift Cairo.fontExtents
-  let ascent     = Cairo.fontExtentsAscent  ext
-  let descent    = Cairo.fontExtentsDescent ext
-  let fontHeight = ascent + descent
-  let fontWidth  = Cairo.fontExtentsMaxXadvance ext
-  liftIO $ logIO _textevt $
-    "fontHeight="++show fontHeight++", fontWidth="++show fontWidth++
-    ", ascent="++show ascent++", descent="++show descent
-  return $ f fontWidth fontHeight ascent descent
-
-getGridCellSizeDouble :: CairoRender (Size2D Double)
-getGridCellSizeDouble = withCairoFontExtents $ \ fontWidth fontHeight _ascent _descent -> 
-  V2 fontWidth fontHeight
-
-cairoGridLocationOfPoint :: Point2D Double -> CairoRender TextGridLocation
-cairoGridLocationOfPoint pt = do
-  off <- CairoRender $ use $ cairoScreenPrinterState . renderOffset
-  let (V2 x y) = pt - off
-  withCairoFontExtents $ \ fontWidth fontHeight _ascent _descent -> TextGridLocation
-    (TextGridRow    $ floor $ y / fontHeight)
-    (TextGridColumn $ floor $ x / fontWidth)
-
-cairoArray :: (Int -> Int -> Cairo.SurfaceData Int Word32 -> IO a) -> Cairo.Render a
-cairoArray f = Cairo.withTargetSurface $ \ surface -> do
-  w <- Cairo.imageSurfaceGetWidth surface
-  h <- Cairo.imageSurfaceGetHeight surface
-  liftIO $ Cairo.imageSurfaceGetPixels surface >>= f w h
-
-pointToInt :: RealFrac n => Int -> Int -> Point2D n -> Int
-pointToInt w _h pt = let (x, y) = (round <$> pt) ^. pointXY in y*w + x
-
--- | The implementation of 'Happlets.Draw.getPoint' for the 'Cairo.Render' function type.
-cairoGetPoint :: RealFrac n => Point2D n -> Cairo.Render Color
-cairoGetPoint pt = cairoArray $ \ w h surfaceData ->
-  liftIO $ set32BitsARGB <$> readArray surfaceData (pointToInt w h pt)
-
--- | Call this function at least once before calling 'cairoSetPoint'. Note that if you use a
--- 'CairoRender' function type and the ordinary 'Happlets.Draw.setPoint' function in the
--- "Happlets.Draw" module, this function never needs to be called, the internal state of the
--- 'CairoRender' function tracks when to flush and when to invalidate.
-cairoFlush :: Cairo.Render ()
-cairoFlush = Cairo.withTargetSurface Cairo.surfaceFlush
-
-cairoResetAntialiasing :: Cairo.Render ()
-cairoResetAntialiasing = do
-  Cairo.setAntialias Cairo.AntialiasNone
-  Cairo.setTolerance 1.0
-
--- | Force a single pixel at a given location to change to the given color.
-cairoSetPoint :: RealFrac n => Point2D n -> Color -> Cairo.Render ()
-cairoSetPoint pt = get32BitsARGB >>> \ w32 -> cairoArray $ \ w h surfaceData ->
-  liftIO $ writeArray surfaceData (pointToInt w h pt) w32
-
--- | Call this function at least once after you have finished a series of calls to 'cairoSetPoint'
--- but before any calls to any other cairo functions. Note that if you use a 'CairoRender' function
--- type and the ordinary 'Happlets.Draw.setPoint' function in the "Happlets.Draw" module, this
--- function never needs to be called, the internal state of the 'CairoRender' function tracks when
--- to flush and when to invalidate.
-cairoInvalidate :: Cairo.Render ()
-cairoInvalidate = Cairo.withTargetSurface Cairo.surfaceMarkDirty
-
--- | Use the Happlets-native color data type 'Happlets.Draw.Color.Color' to set the Cairo
--- "source" color in the Cairo context.
-cairoSetColor :: Color -> Cairo.Render ()
-cairoSetColor = unpackRGBA32Color >>> \ (r,g,b,a) -> Cairo.setSourceRGBA r g b a
-
--- | Push the graphics context by calling 'Cairo.save' before evaluating a given 'Cario.Render'
--- function. When evaluation completes, pop the graphics context by calling 'Cairo.restore'.
-cairoPreserve :: CairoRender a -> CairoRender a
-cairoPreserve f = cairoRender Cairo.save >> f <* cairoRender Cairo.restore
-
-cairoGradStops :: Cairo.Pattern -> [GradientStop] -> Cairo.Render ()
-cairoGradStops pat = mapM_ $ \ stop -> do
-  let (r,g,b,a) = unpackRGBA32Color $ stop ^. gradStopColor
-  Cairo.patternAddColorStopRGBA pat (stop ^. gradStopPoint) r g b a
-
-m44toCairoMatrix :: RealFrac n => Transform2D n -> Cairo.Matrix
-m44toCairoMatrix m0 = let (V2 (V2 xx yx) (V2 xy yy)) = fmap realToFrac <$> (m0 ^. _m22) in
-  Cairo.Matrix xx yx xy yy 0 0
-
-cairoDrawWithSource :: Lens' CairoRenderState PaintSource -> Cairo.Render () -> CairoRender ()
-cairoDrawWithSource paint draw = do
-  use paint >>= cairoRender . \ case
-    PaintSolidColor    color           -> cairoSetColor color
-    PaintGradient gtyp start end stops -> case gtyp of
-      GradRadial (V2 x1 y1) (Magnitude r1) (V2 x2 y2) (Magnitude r2) -> let f = realToFrac in
-        Cairo.withRadialPattern (f x1) (f y1) (f r1) (f x2) (f y2) (f r2) $ \ pat -> do
-          cairoGradStops pat $
-            GradientStop 0.0 start : gradStopsToList stops ++ [GradientStop 1.0 end]
-  geom <- use cairoGeometry
-  vectorMode
-  cairoRender $ do
-    Cairo.setLineWidth $ geom ^. cairoLineWidth
-    Cairo.setMatrix $ m44toCairoMatrix $ geom ^. cairoBlitTransform
-    cairoDrawShape $ geom ^. cairoShape
-    draw
-
--- | Move the position of the cairo graphics context "pen" object.
-cairoMoveTo :: RealFrac n => Point2D n -> Cairo.Render ()
-cairoMoveTo = uncurry Cairo.moveTo . view pointXY . fmap realToFrac
-
--- | Using the cairo graphics context current color, and the position of the "pen" object, draw a
--- line from the current pen position to the given point.
-cairoLineTo :: RealFrac n => Point2D n -> Cairo.Render ()
-cairoLineTo = uncurry Cairo.lineTo . view pointXY . fmap realToFrac
-
--- | Draw a single line of the given color. This will also draw the line caps at the start and end
--- points.
-cairoDrawLine
-  :: (RealFrac n, RealFrac lw)
-  => LineColor -> LineWidth lw -> Line2D n -> Cairo.Render ()
-cairoDrawLine color width line = do
-  cairoSetColor color
-  Cairo.setLineCap Cairo.LineCapRound
-  Cairo.setLineWidth $ realToFrac width
-  cairoMoveTo $ line ^. line2DHead
-  cairoLineTo $ line ^. line2DTail
-  Cairo.stroke
-
--- | Similar to 'cairoDrawLine' but draws multiple line segments, each next segment beginning where
--- the previous segment ended. The line is drawn with the given color. Only two line caps are drawn:
--- one at the first given point and one at the last given point in the list of points.
-cairoDrawPath
-  :: (RealFrac n, RealFrac lw)
-  => LineColor -> LineWidth lw -> [Point2D n] -> Cairo.Render ()
-cairoDrawPath color width =
-  let run a ax = do
-        cairoSetColor color
-        Cairo.setLineCap Cairo.LineCapRound
-        Cairo.setLineWidth $ realToFrac width
-        Cairo.setLineJoin Cairo.LineJoinMiter
-        cairoMoveTo a
-        forM_ ax cairoLineTo
-        Cairo.stroke
-  in  \ case { [] -> return (); [a] -> run a [a]; a:ax -> run a ax; }
-
-cairoRectangle :: RealFrac n => Rect2D n -> Cairo.Render ()
-cairoRectangle rect = do
-  cairoMoveTo $ rect ^. rect2DHead
-  let (head, tail) = (realToFrac <$> canonicalRect2D rect) ^. rect2DPoints
-  let (x, y) = head ^. pointXY
-  let (w, h) = (tail - head) ^. pointXY
-  Cairo.rectangle x y w h
-
-cairoDrawRect
-  :: (RealFrac n, RealFrac lw)
-  => LineColor -> LineWidth lw -> FillColor -> Rect2D n -> Cairo.Render ()
-cairoDrawRect lineColor width fillColor rect = do
-  cairoSetColor fillColor
-  cairoRectangle rect
-  Cairo.fill
-  when (width > 0.0) $ do
-    cairoSetColor lineColor
-    Cairo.setLineWidth $ realToFrac width
-    Cairo.setLineJoin Cairo.LineJoinMiter
-    cairoRectangle rect
-    Cairo.stroke
-
-cairoArc :: RealFrac n => Arc2D n -> Cairo.Render ()
-cairoArc arc0 = do
-  let arc = realToFrac <$> arc0
-  let (V2 x y) = arc ^. arc2DOrigin
-  let (Magnitude r) = arc ^. arc2DRadius
-  let (Angle start) = arc ^. arc2DStart
-  let (Angle   end) = arc ^. arc2DEnd
-  Cairo.arc x y r start end
-
-cairoPath :: (UVec.Unbox n, RealFrac n) => Path2D n -> Cairo.Render ()
-cairoPath = path2DPoints >>> \ (init, points) -> do
-  cairoMoveTo init
-  forM_ points cairoLineTo
-
-cairoCubic :: (UVec.Unbox n, RealFrac n) => Cubic2D n -> Cairo.Render ()
-cairoCubic = cubic2DPoints >>> \ (init, segments) -> do
-  cairoMoveTo init
-  forM_ (fmap realToFrac <$> segments) $ \ seg -> do
-    let (V2 ctrl1X ctrl1Y) = seg ^. cubic2DCtrlPt1
-    let (V2 ctrl2X ctrl2Y) = seg ^. cubic2DCtrlPt2
-    let (V2   endX   endY) = seg ^. cubic2DEndPoint
-    Cairo.curveTo ctrl1X ctrl1Y ctrl2X ctrl2Y endX endY
-
-cairoDrawShape :: (UVec.Unbox n, RealFrac n) => Draw2DShape n -> Cairo.Render ()
-cairoDrawShape = \ case
-  Draw2DReset -> return ()
-  Draw2DLine (Line2D from to) -> cairoMoveTo from >> cairoLineTo to
-  Draw2DRect  rect -> cairoRectangle rect
-  Draw2DArc   arc  -> cairoArc arc
-  Draw2DPath  path -> cairoPath path
-  Draw2DCubic path -> cairoCubic path
-
--- | This is a helpful function you can use for your 'Happlet.Control.controlRedraw' function to clear
--- the window with a background color, given by the four 'Prelude.Double' parameters for Red, Green,
--- Blue, and Alpha (in that order).
-cairoClearCanvas :: Double -> Double -> Double -> Double -> Cairo.Render ()
-cairoClearCanvas r g b a = do
-  logIO <- mkLogger "cairoClearCanvas"
-  liftIO $ logIO _drawevt $ unwords $ show <$> [r,g,b,a]
-  op <- Cairo.getOperator
-  Cairo.setOperator Cairo.OperatorSource
-  Cairo.setSourceRGBA r g b a
-  Cairo.paint
-  Cairo.setOperator op
-
---cairoSelectFont :: SelectFont -> GtkGUI model (Maybe FontExtents)
---cairoSelectFont font0 = liftGtkStateIntoGUI $ evalCairo $ do
---  let loop (bold,italic,oblique,syms) = \ case
---        []   -> (bold, italic, oblique, Strict.unwords $ syms [])
---        a:ax -> let w = Strict.toLower a in ax & case w of
---          w | w == Strict.pack "bold"    -> loop (bold + 1, italic, oblique, syms)
---          w | w == Strict.pack "italic"  -> loop (bold, italic + 1, oblique, syms)
---          w | w == Strict.pack "oblique" -> loop (bold, italic, oblique + 1, syms)
---          _                  -> loop (bold, italic, oblique, syms . (a :))
---  let zero = 0 :: Int
---  let one = 1 :: Int
---  let (bold,italic,oblique,font) = loop (0, 0, 0, id) $ Strict.words font0
---  if italic > zero && oblique > zero || bold > one || italic > one || oblique > one
---   then return Nothing
---   else do
---    Cairo.selectFontFace font
---      (if italic > 0 then Cairo.FontSlantItalic else
---       if oblique > 0 then Cairo.FontSlantOblique else Cairo.FontSlantNormal)
---      (if bold > 0 then Cairo.FontWeightBold else Cairo.FontWeightNormal)
---    ext <- Cairo.fontExtents
---    return $ Just FontExtents
---      { fontExtentsAscent      = RealApprox $ Cairo.fontExtentsAscent ext
---      , fontExtentsDescent     = RealApprox $ Cairo.fontExtentsDescent ext
---      , fontExtentsHeight      = RealApprox $ Cairo.fontExtentsHeight ext
---      , fontExtentsMaxXadvance = RealApprox $ Cairo.fontExtentsMaxXadvance ext
---      , fontExtentsMaxYadvance = RealApprox $ Cairo.fontExtentsMaxYadvance ext
---      }
-
-----------------------------------------------------------------------------------------------------
-
 instance Managed GtkWindow where
   windowVisible = gtkWindowVisible
   visibleEvents react = installEventHandler EventSetup
@@ -1607,7 +929,7 @@ instance CanRecruitWorkers GtkWindow where
         winst <- get
         ((result, winst), _model) <- liftIO $ onHapplet (theGUIHapplet guist) $ \ model -> do
           (result, guist) <- runGUI gui guist
-            { theGUIWindow = GtkLockedWin winst
+            { theGUIProvider = GtkLockedWin winst
             , theGUIModel  = model
             }
           return ((result, theGUIWindow guist), theGUIModel guist)
@@ -1631,7 +953,7 @@ instance CanRecruitWorkers GtkWindow where
       winst <- get
       ((result, winst), _model) <- liftIO $ onHapplet (theGUIHapplet guist) $ \ model -> do
         (result, guist) <- runGUI gui guist
-          { theGUIWindow = GtkLockedWin winst
+          { theGUIProvider = GtkLockedWin winst
           , theGUIModel  = model
           }
         return ((result, theGUIWindow guist), theGUIModel guist)
@@ -2113,25 +1435,122 @@ gdkBlit canvas pixmap (V2 dx dy)  = do
 
 ----------------------------------------------------------------------------------------------------
 
---  -- | A 'GtkDrawing' is a function that produces a 'Diagrams.Core.Types.Diagram' from a
---  -- 'Diagrams.BoundingBox.BoundingBox'. Use the 'Diagrams.BoundingBox.BoundingBox' information to
---  -- inform the placement and scale of your diagram.
---  type GtkCairoDiagram = BoundingBox V2 Double -> Diagram Cairo
+instance HappletWindow GtkWindow CairoRender where
+  getWindowSize             = liftGtkStateIntoGUI _drawevt "getWindowSize" $ do
+    logIO <- mkLogger "getWindowSize"
+    env <- get
+    liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
+      -- Obtain the size from the draw window, but will not draw to the draw window.
+      (w, h) <- Gtk.drawableGetSize (gtkDrawWindow livest)
+      return $ V2 (sampCoord w) (sampCoord h)
+
+  windowChangeHapplet       = gtkSetHapplet
+
+  changeEvents              = installEventHandler .
+    simpleSetup _ctxevt "changeEvents" detatchHandler . const
+
+  onCanvas                  =
+    liftGtkStateIntoGUI _drawevt "onCanvas"  . evalCairoOnCanvas
+
+  onOSBuffer                =
+    liftGtkStateIntoGUI _drawevt "onOSBuffer". evalCairoOnGtkDrawable
+
+  windowClipRegion          = Variable
+    { setVal = onCanvas . cairoRender . \ case
+        Nothing   -> Cairo.restore
+        Just rect -> do
+          Cairo.save
+          let head = rect ^. rect2DHead
+          let tail = rect ^. rect2DTail
+          let (x, y) = head ^. pointXY
+          let (w, h) = (tail - head) ^. pointXY
+          let f (SampCoord x) = realToFrac x
+          Cairo.rectangle (f x) (f y) (f w) (f h)
+          Cairo.clip
+    }
+
+  refreshRegion rects       = liftGtkStateIntoGUI _drawevt "refreshRegion" $ do
+    logIO <- mkLogger "refreshRegion"
+    env <- get
+    liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $ \ livest ->
+      logSubIO logIO _drawevt "Gtk.renderWithDrawable refreshRegion" $
+        Gtk.renderWithDrawable (gtkDrawWindow livest) $
+          forM_ (fmap realToFrac . canonicalRect2D <$> rects) $ \ rect -> do
+            Cairo.setOperator Cairo.OperatorSource
+            Cairo.setSourceSurface (theCairoSurface livest) (0.0) (0.0)
+            let (x, y) = (rect) ^. rect2DHead . pointXY
+            let (w, h) = ((rect ^. rect2DTail) - (rect ^. rect2DHead)) ^. pointXY
+            Cairo.rectangle x y w h
+            Cairo.fill
+
+  refreshWindow            = liftGtkStateIntoGUI _drawevt "refreshWindow" $ do
+    logIO <- mkLogger "refreshWindow"
+    env <- get
+    liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $ \ livest -> do
+      logSubIO logIO _drawevt "Gtk.renderWithDrawable refreshWindow" $
+        Gtk.renderWithDrawable (gtkDrawWindow livest) $ do
+          Cairo.setOperator Cairo.OperatorSource
+          Cairo.setSourceSurface (theCairoSurface livest) (0.0) (0.0)
+          Cairo.paint
+
+instance Happlet2DGraphics CairoRender where
+  pixel p0 = let p@(V2 x y) = realToFrac <$> p in Variable
+    { setVal = \ color -> do
+        rasterMode x y
+        cairoRender $ cairoSetPoint (V2 x y) color
+    , getVal = cairoRender (cairoFlush >> cairoGetPoint (V2 x y))
+    }
+
+  tempContext = cairoPreserve
+
+  resetGraphicsContext = cairoRender $ do
+    cairoFlush
+    Cairo.setOperator Cairo.OperatorSource
+    cairoResetAntialiasing
+
+  fill = cairoDrawWithSource canvasFillColor Cairo.fill
+
+  stroke = cairoDrawWithSource canvasStrokeColor Cairo.stroke
+
+  blitOperator = Variable
+    { setVal = cairoRender . Cairo.setOperator . \ case
+        BlitSource   -> Cairo.OperatorSource
+        BlitOver     -> Cairo.OperatorOver
+        BlitXOR      -> Cairo.OperatorXor
+        BlitAdd      -> Cairo.OperatorAdd
+        BlitSaturate -> Cairo.OperatorSaturate
+    , getVal = cairoRender $ Cairo.getOperator >>= \ case
+        Cairo.OperatorSource   -> return BlitSource
+        Cairo.OperatorOver     -> return BlitOver
+        Cairo.OperatorXor      -> return BlitXOR
+        Cairo.OperatorAdd      -> return BlitAdd
+        Cairo.OperatorSaturate -> return BlitSaturate
+        op -> fail $ "Using a Cairo blit operator not known to Happlets: "++show op
+    }
+
+  fillColor = variableFromLens canvasFillColor
+
+  strokeColor = variableFromLens canvasStrokeColor
+
+  clipRegion = Variable
+    { setVal = \ rect -> do
+        cairoClipRect .= rect
+        cairoRender $ Cairo.resetClip >> cairoRectangle (toRational <$> rect) >> Cairo.clip
+    , getVal = use cairoClipRect
+    }
+
+  clearScreen = unpackRGBA32Color >>> \ (r,g,b,a) -> cairoRender $ cairoClearCanvas r g b a
+
+instance Happlet2DGeometry CairoRender Double where
+  shape         = variableFromLens (cairoGeometry . cairoShape)
+  strokeWeight  = variableFromLens (cairoGeometry . cairoLineWidth)
+  blitTransform = variableFromLens (cairoGeometry . cairoBlitTransform)
 
 -- | This data type contains a pointer to an image buffer in memory, and also a function used to
 -- perform some drawing to the pixel values.
-data CairoPixelBuffer
-  = CairoPixelBuffer
-    {
-#if USE_CAIRO_SURFACE_BUFFER
-      gtkCairoSurfaceMVar :: MVar Cairo.Surface
-#else
-      gtkPixmapMVar :: MVar Gtk.Pixmap
-#endif
-    }
+newtype CairoPixelBuffer = CairoPixelBuffer{ gtkCairoSurfaceMVar :: MVar Cairo.Surface }
 
 instance CanBufferPixels GtkWindow CairoRender CairoPixelBuffer where
-#if USE_CAIRO_SURFACE_BUFFER
   newImageBuffer size@(V2 w h) draw = liftGtkStateIntoGUI _drawevt "newImageBuffer" $ do
     rendst <- use cairoRenderState
     (a, rendst, img) <- liftIO $ do
@@ -2177,123 +1596,7 @@ instance CanBufferPixels GtkWindow CairoRender CairoPixelBuffer where
           Cairo.renderWith surface $ runCairoRender (sampCoord <$> size) rendst draw
     cairoRenderState .= rendst
     return a
-
-#else
-  newImageBuffer  (V2 (SampCoord w) (SampCoord h)) draw = liftIO $ do
-    logIO <- mkLogger "newImageBuffer"
-    logIO _drawevt $ unwords ["Gtk.pixmapNew", show w, show h]
-    pixmap <- Gtk.pixmapNew (Nothing :: Maybe Gtk.Pixmap)
-      (fromIntegral w) (fromIntegral h) (Just 32)
-    logSubIO _drawevt "Gtk.renderWithDrawable newImageBuffer" $
-      Gtk.renderWithDrawable pixmap $ runCairoRender draw
-    mvar <- newMVar pixmap
-    return CairoPixelBuffer
-      { gtkPixmapMVar = mvar
-      }
-
-  resizeImageBuffer (CairoPixelBuffer{gtkPixmapMVar=mvar}) (V2 w h) draw = do
-    logIO <- mkLogger "resizeImageBuffer"
-    liftIO $ logModMVar logIO _drawevt mvar $ \ pixmap -> do
-      logIO _drawevt $ unwords ["Gtk.pixmapNew", show w, show h]
-      pixmap <- Gtk.pixmapNew (Just pixmap) (fromIntegral w) (fromIntegral h) (Just 32)
-      a <- logSubIO _drawevt "Gtk.renderWithDrawable resizeImageBuffer" $
-        Gtk.renderWithDrawable pixmap $ runCairoRender draw
-      return (pixmap, a)
-
-  drawImage (CairoPixelBuffer{gtkPixmapMVar=mvar}) draw = do
-    logIO <- mkLogger "drawImage"
-    liftIO $ logWithMVar logIO _drawevt mvar $
-      logIO _drawevt "Gtk.renderWithDrawable drawImage" .
-      flip Gtk.renderWithDrawable (runCairoRender draw)
-#endif
-
---  -- | Convert a 'GtkCairoDiagram', which is a type of 'Diagrams.Core.Types.Diagram', and convert it
---  -- to a Cairo 'Cairo.Render'-ing computation which can be used to set the 'controlView' of the
---  -- 'Controller'.
---  gtkCairoDiagram :: GtkCairoDiagram -> V2 Double -> Cairo.Render ()
---  gtkCairoDiagram diagram size = snd $ renderDia Cairo
---    ( CairoOptions
---      { _cairoFileName     = ""
---      , _cairoSizeSpec     = dims size
---      , _cairoOutputType   = RenderOnly
---      , _cairoBypassAdjust = True
---      }
---    ) (diagram $ fromCorners origin (P size))
-
 ----------------------------------------------------------------------------------------------------
-
-newtype LinuxAudioOut sample fmt = LinuxAudioOut (MVar (FrameCounter -> PCM sample))
-type StereoPulseCode = Stereo.T PulseCode
-
-stereoFormat :: (LeftPulseCode, RightPulseCode) -> StereoPulseCode
-stereoFormat = uncurry Stereo.cons
-
--- TODO: determine a more platform-agnostic way of obtaining the default device ID.
-audioDeviceID :: IO String
-audioDeviceID = return "pulse"
-
-minAudioBufferSize :: Int
-minAudioBufferSize = ceiling $ gtkAnimationFrameRate / realToFrac audioSampleRate
-
-makeAudioSource
-  :: Storable fmt
-  => (sample -> fmt) -> SampleCount Int -> MVar (FrameCounter -> PCM sample)
-  -> Linux.SoundSource (LinuxAudioOut sample) fmt
-makeAudioSource format _bufSize mvar =
-  Linux.SoundSource
-  { Linux.soundSourceOpen  = return $ LinuxAudioOut mvar --newEmptyMVar
-  , Linux.soundSourceClose = \ (LinuxAudioOut _mvar) -> return () --void $ takeMVar mvar
-  , Linux.soundSourceStart = \ (LinuxAudioOut _mvar) -> return () --newSt >>= putMVar mvar
-  , Linux.soundSourceStop  = \ (LinuxAudioOut _mvar) -> return () --void $ takeMVar mvar
-  , Linux.soundSourceRead  = \ (LinuxAudioOut mvar) ptr bufSize -> do
-      let writer t i pcm = if i >= bufSize then return (pcm, t) else do
-            sample <- runPCM $ pcm t
-            pokeElemOff ptr i $ format sample
-            ((writer $! t + 1) $! i + 1) pcm
-      let loop t = modifyMVar mvar (writer t 0) >>= loop
-      loop 0
-  }   
-
-type MakeAudioSource sample fmt
-  =  SampleCount Int
-  -> MVar (FrameCounter -> PCM sample)
-  -> Linux.SoundSource (LinuxAudioOut sample) fmt
-
-makeStereoSource :: MakeAudioSource (LeftPulseCode, RightPulseCode) StereoPulseCode
-makeStereoSource = makeAudioSource stereoFormat
-
-makeMonoSource :: MakeAudioSource PulseCode PulseCode
-makeMonoSource = makeAudioSource id
-
-data AudioPlaybackThread
-  = MonoPlaybackThread
-      !(Maybe ThreadId) !(MVar (FrameCounter -> PCM PulseCode))
-  | StereoPlaybackThread
-      !(Maybe ThreadId) !(MVar (FrameCounter -> PCM (LeftPulseCode, RightPulseCode)))
-
-makeAudioFormat :: Storable fmt => Linux.SoundFmt fmt
-makeAudioFormat = Linux.SoundFmt (round audioSampleRate)
-
-startPlaybackThread :: BufferSizeRequest -> PCMGenerator -> IO AudioPlaybackThread
-startPlaybackThread reqSize gen = do
-  devID <- audioDeviceID
-  let bufSize = max minAudioBufferSize $ ceiling $ reqSize * realToFrac audioSampleRate
-  let sink :: Linux.SampleFmt fmt => Linux.SoundFmt fmt -> Linux.SoundSink Linux.Pcm fmt
-      sink = Linux.alsaSoundSink devID
-  let make :: Linux.SampleFmt fmt
-        => (Maybe ThreadId -> MVar (FrameCounter -> PCM sample) -> AudioPlaybackThread)
-        -> MakeAudioSource sample fmt
-        -> Linux.SoundFmt fmt
-        -> Int
-        -> (FrameCounter -> PCM sample)
-        -> IO AudioPlaybackThread
-      make constr src linFmt chans gen = do
-        mvar <- newMVar gen
-        fmap (flip constr mvar . Just) $ forkOS $
-          Linux.copySound (src bufSize mvar) (sink linFmt) $ chans * bufSize
-  case gen of
-    PCMGenerateStereo gen -> make StereoPlaybackThread makeStereoSource makeAudioFormat 2 gen
-    PCMGenerateMono   gen -> make MonoPlaybackThread   makeMonoSource   makeAudioFormat 1 gen
 
 instance AudioPlayback (GUI GtkWindow model) where
   audioPlayback newGen = liftGtkStateIntoGUI _audioevt "audioPlayback" $ do
@@ -2350,62 +1653,3 @@ instance AudioPlayback (GUI GtkWindow model) where
         MonoPlaybackThread   thid _ -> thid
     ) <$> use audioPlaybackThread
 
-----------------------------------------------------------------------------------------------------
-
--- | This is the Happlet back-end 'Happlets.Provider.Provider' which you must pass to
--- 'Happlets.GUI.runGUI' in the @main@ function of your Happlet program.
-gtkHapplet :: Provider GtkWindow
-gtkHapplet = Provider
-  { defaultConfig = Config
-      { theConfigErrorsOnLoad      = []
-      , theConfigFilePath          = ""
-      , theRegisteredAppName       = "Happlet"
-      , theWindowTitleBar          = "Happlet"
-      , theBackgroundTransparency  = Just 0.9
-      , theBackgroundGreyValue     = 1.0
-      , theRecommendWindowPosition = (0, 30)
-      , theRecommendWindowSize     = (800, 600)
-      , theAnimationFrameRate      = gtkAnimationFrameRate
-      , willDecorateWindow         = True
-      , willQuitOnWindowClose      = True
-      , willDeleteWindowOnClose    = False
-      }
-  , doInitializeGUI         = gtkInit
-  , doGUIEventLoopLaunch    = gtkLaunchEventLoop
-  , doWindowNew             = gtkNewWindow
-  , doWindowDelete          = \ env -> do
-      logIO <- mkLogger "doWindowDelete"
-      lockGtkWindow logIO _winevt env $ get >>= liftIO . deleteWin
-  , doWindowAttach          = gtkAttachHapplet
-  }
-
--- A static variable used to ensure the functions in this module only call 'gtkInit' once.
-gtkInitCheck :: MVar Bool
-gtkInitCheck = unsafePerformIO $ newMVar False
-{-# NOINLINE gtkInitCheck #-}
-
--- You must call this function prior to all evaluation of any GUI programming. This will call the
--- stateful IO functions that initialize the Gtk+ library. Be sure to call this only once.
-gtkInit :: IO ()
-gtkInit = do
-  alreadyInitd <- readMVar gtkInitCheck
-  unless alreadyInitd $ do
-    logIO <- mkLogger "gtkInit"
-    logIO _setup "Gtk.initGUI"
-    Gtk.initGUI >>= mapM_ (logIO _setup)
-    logModMVar_ logIO _setup "gtkInitCheck" gtkInitCheck $ return . const True
-
--- | Launch the Gtk+ main event loop. This function is usually called via the
--- 'Happlets.Initialize.launchGUIEventLoop' function, which is automatically called by the
--- 'Happlets.Initialize.happlet' function.
-gtkLaunchEventLoop :: Config -> IO ()
-gtkLaunchEventLoop cfg = do
-  logIO <- mkLogger "gtkEventLoop"
-  let appName = cfg ^. registeredAppName
-  unless (Strict.null appName) $ do
-    logIO _setup $ "Glib.setProgramName " ++ show appName
-    Glib.setProgramName appName
-    logIO _setup $ "Glib.setApplicationName " ++ show appName
-    Glib.setApplicationName appName
-  logIO _setup "Gtk.mainGUI"
-  Gtk.mainGUI
