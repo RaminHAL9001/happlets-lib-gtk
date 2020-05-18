@@ -37,6 +37,12 @@ mkLogger func = return $ \ sel msg -> if sel .&. debugThisModule == mempty then 
 
 ----------------------------------------------------------------------------------------------------
 
+-- | This data type contains a pointer to an image buffer in memory, and also a function used to
+-- perform some drawing to the pixel values.
+newtype CairoPixelBuffer = CairoPixelBuffer{ gtkCairoSurfaceMVar :: MVar CairoRenderState }
+
+----------------------------------------------------------------------------------------------------
+
 -- | A monadic wrapper around a 'Cario.Render' monad. The only reason for this to exist is because
 -- there needs to be an instance of 'Data.Semigroup.Semigroup'.
 --
@@ -93,6 +99,7 @@ data CairoRenderState
     , theCairoClipRect           :: !(Rect2D SampCoord)
     , theCairoRenderMode         :: !CairoRenderMode
     , theCairoScreenPrinterState :: !ScreenPrinterState
+    , theGtkCairoSurface         :: !(Maybe Cairo.Surface)
     }
 
 cairoKeepWinSize :: Lens' CairoRenderState PixSize
@@ -113,6 +120,9 @@ cairoClipRect = lens theCairoClipRect $ \ a b -> a{ theCairoClipRect = b }
 cairoRenderMode :: Lens' CairoRenderState CairoRenderMode
 cairoRenderMode = lens theCairoRenderMode $ \ a b -> a{ theCairoRenderMode = b }
 
+gtkCairoSurface :: Lens' CairoRenderState (Maybe Cairo.Surface)
+gtkCairoSurface = lens theGtkCairoSurface $ \ a b -> a{ theGtkCairoSurface = b }
+
 canvasResizeMode :: Lens' CairoRenderState CanvasResizeMode
 canvasResizeMode = lens theCanvasResizeMode $ \ a b -> a{ theCanvasResizeMode = b }
 
@@ -126,6 +136,15 @@ cairoRender :: Cairo.Render a -> CairoRender a
 cairoRender = CairoRender . lift
 
 -- | Extract a @"Graphics.Rendering.Cairo".'Cairo.Render'@ from a 'CairoRender' function type.
+--
+-- This function requries you to pass the desired pixel buffer size, which is usually stored as part
+-- of the data structure that contains the canvas (or stored by the operating system window manager
+-- as it keeps track of window sizes). Internally, the 'CairoRenderState' keeps track of it's own
+-- windows size. When this function is evalauted, if the window size you pass here is different from
+-- the window size tracked in the 'CairoRenderState', a decision is made based on the value of
+-- 'canvasResizeMode' as to whether a new pixel buffer of the new size needs to be allocated and the
+-- old pixel buffer needs to be blitted to the new pixel buffer before evaluating the given image
+-- drawing function.
 runCairoRender
   :: PixSize -> CairoRenderState -> CairoRender a -> Cairo.Render (a, CairoRenderState)
 runCairoRender winsize rendst (CairoRender render) =
@@ -305,15 +324,17 @@ m44toCairoMatrix m0 = let (V2 (V2 xx yx) (V2 xy yy)) = fmap realToFrac <$> (m0 ^
   Cairo.Matrix xx yx xy yy 0 0
 
 cairoDrawWithSource :: Lens' CairoRenderState PaintSource -> Cairo.Render () -> CairoRender ()
-cairoDrawWithSource paint draw = do
+cairoDrawWithSource paint draw = let f = realToFrac in do
   use paint >>= cairoRender . \ case
     PaintSolidColor    color           -> cairoSetColor color
-    PaintGradient gtyp start end stops -> case gtyp of
-      GradRadial (V2 x1 y1) (Magnitude r1) (V2 x2 y2) (Magnitude r2) -> let f = realToFrac in
-        Cairo.withRadialPattern (f x1) (f y1) (f r1) (f x2) (f y2) (f r2) $ \ pat -> do
-          cairoGradStops pat $
+    PaintGradient gtyp start end stops -> do
+      let gradStops pat = cairoGradStops pat $
             GradientStop 0.0 start : gradStopsToList stops ++ [GradientStop 1.0 end]
-      GradLinear (Angle theta) -> error "TODO"
+      case gtyp of
+        GradRadial (V2 x1 y1) (Magnitude r1) (V2 x2 y2) (Magnitude r2) ->
+          Cairo.withRadialPattern (f x1) (f y1) (f r1) (f x2) (f y2) (f r2) gradStops
+        GradLinear (V2 x1 y1) (V2 x2 y2) ->
+          Cairo.withLinearPattern (f x1) (f y1) (f x2) (f y2) gradStops
   geom <- use cairoGeometry
   vectorMode
   cairoRender $ do
