@@ -68,16 +68,18 @@ data CairoRenderMode
 
 data CairoGeometry n
   = CairoGeometry
-    { theCairoShape         :: !(Draw2DShape n)
-    , theCairoLineWidth     :: !(LineWidth n)
-    , theCairoBlitTransform :: !(Transform2D n)
+    { theCairoShape            :: !(Draw2DShape n)
+    , theCairoLineWidth        :: !(LineWidth n)
+    , theCairoBlitTransform    :: !(Transform2D n)
+    , theCairoPatternTransform :: !(Transform2D n)
     }
 
 instance Map2DShape CairoGeometry where
   map2DShape f geom = CairoGeometry
-    { theCairoShape         = map2DShape f $ theCairoShape geom
-    , theCairoLineWidth     = f $ theCairoLineWidth geom
-    , theCairoBlitTransform = fmap (fmap f) $ theCairoBlitTransform geom
+    { theCairoShape            = map2DShape f $ theCairoShape geom
+    , theCairoLineWidth        = f $ theCairoLineWidth geom
+    , theCairoBlitTransform    = fmap (fmap f) $ theCairoBlitTransform geom
+    , theCairoPatternTransform = fmap (fmap f) $ theCairoPatternTransform geom
     }
 
 cairoShape :: Lens' (CairoGeometry n) (Draw2DShape n)
@@ -88,6 +90,9 @@ cairoLineWidth = lens theCairoLineWidth $ \ a b -> a{ theCairoLineWidth = b }
 
 cairoBlitTransform :: Lens' (CairoGeometry n) (Transform2D n)
 cairoBlitTransform = lens theCairoBlitTransform $ \ a b -> a{ theCairoBlitTransform = b }
+
+cairoPatternTransform :: Lens' (CairoGeometry n) (Transform2D n)
+cairoPatternTransform = lens theCairoPatternTransform $ \ a b -> a{ theCairoPatternTransform = b }
 
 data CairoRenderState
   = CairoRenderState
@@ -448,6 +453,64 @@ cairoClearCanvas r g b a = do
   Cairo.setSourceRGBA r g b a
   Cairo.paint
   Cairo.setOperator op
+
+----------------------------------------------------------------------------------------------------
+
+instance Happlet2DGraphics CairoRender where
+  pixel p = let (V2 x y) = realToFrac <$> p in Variable
+    { setVal = \ color -> do
+        rasterMode x y
+        cairoRender $ cairoSetPoint (V2 x y) color
+    , getVal = cairoRender (cairoFlush >> cairoGetPoint (V2 x y))
+    }
+
+  tempContext = cairoPreserve
+
+  resetGraphicsContext = cairoRender $ do
+    cairoFlush
+    Cairo.setOperator Cairo.OperatorSource
+    cairoResetAntialiasing
+
+  fill = cairoDrawWithSource canvasFillColor Cairo.fill
+
+  stroke = cairoDrawWithSource canvasStrokeColor Cairo.stroke
+
+  blitOperator = Variable
+    { setVal = cairoRender . Cairo.setOperator . \ case
+        BlitSource   -> Cairo.OperatorSource
+        BlitOver     -> Cairo.OperatorOver
+        BlitXOR      -> Cairo.OperatorXor
+        BlitAdd      -> Cairo.OperatorAdd
+        BlitSaturate -> Cairo.OperatorSaturate
+    , getVal = cairoRender $ Cairo.getOperator >>= \ case
+        Cairo.OperatorSource   -> return BlitSource
+        Cairo.OperatorOver     -> return BlitOver
+        Cairo.OperatorXor      -> return BlitXOR
+        Cairo.OperatorAdd      -> return BlitAdd
+        Cairo.OperatorSaturate -> return BlitSaturate
+        op -> fail $ "Using a Cairo blit operator not known to Happlets: "++show op
+    }
+
+  fillColor = variableFromLens canvasFillColor
+
+  strokeColor = variableFromLens canvasStrokeColor
+
+  clipRegion = Variable
+    { setVal = \ rect -> do
+        cairoClipRect .= rect
+        cairoRender $ Cairo.resetClip >> cairoRectangle (toRational <$> rect) >> Cairo.clip
+    , getVal = use cairoClipRect
+    }
+
+  clearScreen = unpackRGBA32Color >>> \ (r,g,b,a) -> cairoRender $ cairoClearCanvas r g b a
+
+----------------------------------------------------------------------------------------------------
+
+instance Happlet2DGeometry CairoRender Double where
+  shape            = variableFromLens (cairoGeometry . cairoShape)
+  strokeWeight     = variableFromLens (cairoGeometry . cairoLineWidth)
+  blitTransform    = variableFromLens (cairoGeometry . cairoBlitTransform)
+  patternTransform = variableFromLens (cairoGeometry . cairoPatternTransform)
 
 ----------------------------------------------------------------------------------------------------
 

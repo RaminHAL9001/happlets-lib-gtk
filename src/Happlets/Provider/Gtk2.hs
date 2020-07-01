@@ -434,9 +434,10 @@ gtkNewWindow cfg = do
               , theCanvasResizeMode    = CanvasResizeClear
               , theGtkCairoSurface     = Nothing
               , theCairoGeometry       = CairoGeometry
-                  { theCairoShape         = Draw2DReset
-                  , theCairoLineWidth     = 0
-                  , theCairoBlitTransform = identity
+                  { theCairoShape            = Draw2DReset
+                  , theCairoLineWidth        = 0
+                  , theCairoBlitTransform    = identity
+                  , theCairoPatternTransform = identity
                   }
               , theCairoClipRect = rect2D
               , theCairoScreenPrinterState = screenPrinterState
@@ -822,6 +823,33 @@ instance Managed Gtk2Provider where
         return $ Glib.signalDisconnect focin >> Glib.signalDisconnect focout
     , eventGUIReaction  = react
     }
+  windowSize = Variable
+    { getVal = liftGUIProvider $ do
+        win <- gets gtkWindow
+        liftIO $ do
+          (x, y) <- Gtk.windowGetPosition win
+          (w, h) <- Gtk.windowGetSize     win
+          return $ rect2D
+            & rect2DHead . pointXY .~ (sampCoord x, sampCoord y)
+            & rect2DTail . pointXY .~ (sampCoord x + sampCoord w, sampCoord y + sampCoord h)
+    , setVal = \ rect -> liftGUIProvider $ do
+        win <- gets gtkWindow
+        liftIO $ do
+          let f = fromIntegral :: SampCoord -> Int
+          let (x , y ) = rect ^. rect2DHead . pointXY
+          let (x1, y1) = rect ^. rect2DTail . pointXY
+          let (w , h ) = (x1 - x, y1 - y)
+          Gtk.windowMove   win (f x) (f y)
+          Gtk.windowResize win (f w) (f h)
+    }
+  windowDecorated = Variable
+    { getVal = liftGUIProvider $ do
+        win <- gets gtkWindow
+        liftIO $ Gtk.windowGetDecorated win
+    , setVal = \ bool -> liftGUIProvider $ do
+        win <- gets gtkWindow
+        liftIO $ Gtk.windowSetDecorated win bool
+    }
 
 instance ProviderSyncCallback Gtk2Provider GtkState where
   providerRunSync lock f = Gtk.postGUISync $ runProviderOnLock lock f 
@@ -831,6 +859,8 @@ instance CanResize Gtk2Provider where
     (simpleSetup resizeReaction $ uncurry react)
     { eventPreInstall = cairoRenderState . canvasResizeMode .= mode
     }
+  windowResizeMode = fmapVariableMonad liftGUIProvider $
+    variableFromLens (cairoRenderState . canvasResizeMode)
 
 data AnimationThreadControl
   = AnimationThreadControl
@@ -1258,17 +1288,28 @@ instance HappletWindow Gtk2Provider CairoRender where
   onOSBuffer                = liftGUIProvider . evalCairoOnGtkDrawable
 
   windowClipRegion          = Variable
-    { setVal = onCanvas . cairoRender . \ case
-        Nothing   -> Cairo.restore
-        Just rect -> do
-          Cairo.save
-          let head = rect ^. rect2DHead
-          let tail = rect ^. rect2DTail
-          let (x, y) = head ^. pointXY
-          let (w, h) = (tail - head) ^. pointXY
-          let f (SampCoord x) = realToFrac x
-          Cairo.rectangle (f x) (f y) (f w) (f h)
-          Cairo.clip
+    { getVal = onCanvas $ CairoRender $ Just <$> use cairoClipRect
+    , setVal = \ case
+        Nothing   -> do
+          winsize <- liftGUIProvider $ do
+            livewin <- gets gtkWindowLive
+            liftIO $ withMVar livewin $
+              fmap (($ point2D) . (pointXY .~) . (fromIntegral *** fromIntegral)) .
+              Gtk.drawableGetSize . gtkDrawWindow
+          onCanvas $ do
+            cairoClipRect .= (rect2D & rect2DHead .~ winsize)
+            cairoRender Cairo.restore
+        Just rect -> onCanvas $ do
+          cairoClipRect .= rect
+          cairoRender $ do
+            Cairo.save
+            let head = rect ^. rect2DHead
+            let tail = rect ^. rect2DTail
+            let (x, y) = head ^. pointXY
+            let (w, h) = (tail - head) ^. pointXY
+            let f (SampCoord x) = realToFrac x
+            Cairo.rectangle (f x) (f y) (f w) (f h)
+            Cairo.clip
     }
 
   refreshRegion rects       = liftGUIProvider $ do
@@ -1294,59 +1335,6 @@ instance HappletWindow Gtk2Provider CairoRender where
           Cairo.setOperator Cairo.OperatorSource
           Cairo.setSourceSurface (theCairoSurface livest) (0.0) (0.0)
           Cairo.paint
-
-instance Happlet2DGraphics CairoRender where
-  pixel p0 = let p@(V2 x y) = realToFrac <$> p in Variable
-    { setVal = \ color -> do
-        rasterMode x y
-        cairoRender $ cairoSetPoint (V2 x y) color
-    , getVal = cairoRender (cairoFlush >> cairoGetPoint (V2 x y))
-    }
-
-  tempContext = cairoPreserve
-
-  resetGraphicsContext = cairoRender $ do
-    cairoFlush
-    Cairo.setOperator Cairo.OperatorSource
-    cairoResetAntialiasing
-
-  fill = cairoDrawWithSource canvasFillColor Cairo.fill
-
-  stroke = cairoDrawWithSource canvasStrokeColor Cairo.stroke
-
-  blitOperator = Variable
-    { setVal = cairoRender . Cairo.setOperator . \ case
-        BlitSource   -> Cairo.OperatorSource
-        BlitOver     -> Cairo.OperatorOver
-        BlitXOR      -> Cairo.OperatorXor
-        BlitAdd      -> Cairo.OperatorAdd
-        BlitSaturate -> Cairo.OperatorSaturate
-    , getVal = cairoRender $ Cairo.getOperator >>= \ case
-        Cairo.OperatorSource   -> return BlitSource
-        Cairo.OperatorOver     -> return BlitOver
-        Cairo.OperatorXor      -> return BlitXOR
-        Cairo.OperatorAdd      -> return BlitAdd
-        Cairo.OperatorSaturate -> return BlitSaturate
-        op -> fail $ "Using a Cairo blit operator not known to Happlets: "++show op
-    }
-
-  fillColor = variableFromLens canvasFillColor
-
-  strokeColor = variableFromLens canvasStrokeColor
-
-  clipRegion = Variable
-    { setVal = \ rect -> do
-        cairoClipRect .= rect
-        cairoRender $ Cairo.resetClip >> cairoRectangle (toRational <$> rect) >> Cairo.clip
-    , getVal = use cairoClipRect
-    }
-
-  clearScreen = unpackRGBA32Color >>> \ (r,g,b,a) -> cairoRender $ cairoClearCanvas r g b a
-
-instance Happlet2DGeometry CairoRender Double where
-  shape         = variableFromLens (cairoGeometry . cairoShape)
-  strokeWeight  = variableFromLens (cairoGeometry . cairoLineWidth)
-  blitTransform = variableFromLens (cairoGeometry . cairoBlitTransform)
 
 instance HappletPixelBuffer Gtk2Provider CairoRender where
   imageCanvasResizeMode = Variable
