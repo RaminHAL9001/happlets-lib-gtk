@@ -1,6 +1,6 @@
 module Main where
 
-import           Happlets.Lib.Gtk
+import           Happlets.Provider.Gtk2
 
 import           Control.Concurrent
 
