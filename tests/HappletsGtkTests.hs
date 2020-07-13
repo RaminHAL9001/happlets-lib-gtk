@@ -5,7 +5,6 @@ import           Happlets.Provider.Gtk2
 import           Control.Concurrent
 
 import           Data.Maybe
---import           Data.Semigroup
 import qualified Data.Text as Strict
 
 import qualified Graphics.Rendering.Cairo as Cairo
@@ -30,7 +29,7 @@ main = happlet gtkHapplet $ do
 
   mvar        <- liftIO $ newMVar "Main"
   thisThread  <- liftIO myThreadId
-  win         <- newWindow
+  gtk         <- newProvider
   pulsecircle <- newHapplet PulseCircle
     { thePulseCircleRadius     = 20
     , thePulseCirclePosition   = V2 (-1) (-1)
@@ -44,11 +43,11 @@ main = happlet gtkHapplet $ do
 
   let testSuite = TestSuite
         { testSuiteSharedState = mvar
-        , switchToPulseCircle  = windowChangeHapplet pulsecircle $ pulseCircleGUI testSuite
-        , switchToRedGrid      = windowChangeHapplet redgrid     $ redGridGUI     testSuite
+        , switchToPulseCircle  = changeRootHapplet pulsecircle $ pulseCircleGUI testSuite
+        , switchToRedGrid      = changeRootHapplet redgrid     $ redGridGUI     testSuite
         }
 
-  attachWindow True win redgrid $ redGridGUI testSuite
+  attachWindow gtk True redgrid $ redGridGUI testSuite
 
 ----------------------------------------------------------------------------------------------------
 
@@ -73,12 +72,16 @@ redGridDraw :: Double -> PixSize -> CairoRender ()
 redGridDraw scale winsize = do
   let (V2 w h) = realToFrac <$> winsize
   if scale <= 1 then clearScreen red else do
-    let mkLine v2 top i = Line2D (v2 i 0) (v2 i top)
+    let mkLine v2 top i = Draw2DLine $ line2D & (line2DHead .~ v2 i 0) & (line2DTail .~ v2 i top)
     clearScreen (black & alphaChannel .~ 0.9)
-    forM_ [0::Int .. floor (w / scale)] $
-      drawLine red 1.0 . mkLine V2 h . (+ 0.5) . (* scale) . realToFrac
-    forM_ [0::Int .. floor (h / scale)] $
-      drawLine red 1.0 . mkLine (flip V2) w . (+ 0.5) . (* scale) . realToFrac
+    setEnv strokeWeight (1.0 :: Double)
+    setEnv strokeColor $ PaintSolidColor red
+    forM_ [0::Int .. floor (w / scale)] $ \ i -> do
+      setEnv shape $ mkLine V2 h $ 0.5 + scale * realToFrac i
+      stroke
+    forM_ [0::Int .. floor (h / scale)] $ \ i -> do
+      setEnv shape $ mkLine (flip V2) w $ 0.5 + scale * realToFrac i
+      stroke
     void $ screenPrinter $
       withFontStyle (do{ fontForeColor .= white; fontSize .= 16.0; }) $ do
         renderOffset .= V2 0 0
@@ -93,7 +96,7 @@ redGridGUI ctx _size = do
   changeEvents $ liftIO $ do
     putStrLn "change away from Red Grid"
     void $ swapMVar mvar "Red Grid"
-  resizeEvents CopyCanvasMode $ \ _oldsize newsize -> cancelIfBusy >> draw newsize
+  resizeEvents CanvasResizeCopy $ \ _oldsize newsize -> cancelIfBusy >> draw newsize
   mouseEvents MouseAll $ \ (Mouse _ down _ button pt1@(V2 x1 y1)) -> do
     use lastMouse >>= \ case
       Nothing         -> return ()
@@ -105,7 +108,7 @@ redGridGUI ctx _size = do
         RightClick -> switchToPulseCircle ctx
         LeftClick  -> do
           redGridScale %= \ scale -> if scale <= 4.0 then 64.0 else scale / 2.0
-          getWindowSize >>= draw
+          getEnv windowSize >>= draw . rect2DSize
         _          -> return ()
       scale <- use redGridScale
       mb <- use mouseBox
@@ -128,7 +131,7 @@ redGridGUI ctx _size = do
       Cairo.arc (realToFrac x1 + 0.5) (realToFrac y1 + 0.5) 20.0 0 (2*pi)
       Cairo.stroke
     lastMouse .= Just pt1
-  getWindowSize >>= draw
+  getEnv windowSize >>= draw . rect2DSize
 
 ----------------------------------------------------------------------------------------------------
 
@@ -250,7 +253,7 @@ pulseCircleGUI ctx initSize@(V2 (SampCoord w) (SampCoord h)) = do
 
   -- On resize, simply redraw the window without modifying the model. We don't need to use the new
   -- size information for the window.
-  resizeEvents ClearCanvasMode $ \ _oldsize newSize@(V2 newW newH) -> do
+  resizeEvents CanvasResizeClear $ \ _oldsize newSize@(V2 newW newH) -> do
     old <- get
     let (V2 oldW oldH) = old ^. pulseCircleWindowSize
     let (V2 x    y   ) = old ^. pulseCirclePosition

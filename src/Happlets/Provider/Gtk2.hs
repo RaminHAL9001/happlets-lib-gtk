@@ -685,10 +685,10 @@ type GtkGUI model = GUI Gtk2Provider model
 
 gtkWindowVisible :: Variable (GtkGUI model) Bool
 gtkWindowVisible = Variable
-  { setVal = \ visible -> liftGUIProvider $ gets gtkWindow >>= \ win -> liftIO $
+  { setEnv = \ visible -> liftGUIProvider $ gets gtkWindow >>= \ win -> liftIO $
       if not visible then Gtk.widgetHideAll win else
       Gtk.widgetShowAll win >> Gtk.widgetQueueDraw win
-  , getVal = liftGUIProvider $ gets gtkWindow >>= liftIO . Gtk.widgetGetVisible
+  , getEnv = liftGUIProvider $ gets gtkWindow >>= liftIO . Gtk.widgetGetVisible
   }
 
 -- | This is the function behind the Happlet public API 'Happlets.Initialize.attachWindow'.
@@ -824,7 +824,7 @@ instance Managed Gtk2Provider where
     , eventGUIReaction  = react
     }
   windowSize = Variable
-    { getVal = liftGUIProvider $ do
+    { getEnv = liftGUIProvider $ do
         win <- gets gtkWindow
         liftIO $ do
           (x, y) <- Gtk.windowGetPosition win
@@ -832,7 +832,7 @@ instance Managed Gtk2Provider where
           return $ rect2D
             & rect2DHead . pointXY .~ (sampCoord x, sampCoord y)
             & rect2DTail . pointXY .~ (sampCoord x + sampCoord w, sampCoord y + sampCoord h)
-    , setVal = \ rect -> liftGUIProvider $ do
+    , setEnv = \ rect -> liftGUIProvider $ do
         win <- gets gtkWindow
         liftIO $ do
           let f = fromIntegral :: SampCoord -> Int
@@ -843,10 +843,10 @@ instance Managed Gtk2Provider where
           Gtk.windowResize win (f w) (f h)
     }
   windowDecorated = Variable
-    { getVal = liftGUIProvider $ do
+    { getEnv = liftGUIProvider $ do
         win <- gets gtkWindow
         liftIO $ Gtk.windowGetDecorated win
-    , setVal = \ bool -> liftGUIProvider $ do
+    , setEnv = \ bool -> liftGUIProvider $ do
         win <- gets gtkWindow
         liftIO $ Gtk.windowSetDecorated win bool
     }
@@ -1288,8 +1288,8 @@ instance HappletWindow Gtk2Provider CairoRender where
   onOSBuffer                = liftGUIProvider . evalCairoOnGtkDrawable
 
   windowClipRegion          = Variable
-    { getVal = onCanvas $ CairoRender $ Just <$> use cairoClipRect
-    , setVal = \ case
+    { getEnv = onCanvas $ CairoRender $ Just <$> use cairoClipRect
+    , setEnv = \ case
         Nothing   -> do
           winsize <- liftGUIProvider $ do
             livewin <- gets gtkWindowLive
@@ -1338,8 +1338,8 @@ instance HappletWindow Gtk2Provider CairoRender where
 
 instance HappletPixelBuffer Gtk2Provider CairoRender where
   imageCanvasResizeMode = Variable
-    { setVal = \ mode -> onCanvas $ canvasResizeMode .= mode
-    , getVal = onCanvas $ use canvasResizeMode
+    { setEnv = \ mode -> onCanvas $ canvasResizeMode .= mode
+    , getEnv = onCanvas $ use canvasResizeMode
     }
 
   resizeImageBuffer size@(V2 w h) redraw = onCanvas $ do
