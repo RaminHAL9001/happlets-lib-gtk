@@ -457,11 +457,11 @@ cairoClearCanvas r g b a = do
 ----------------------------------------------------------------------------------------------------
 
 instance Happlet2DGraphics CairoRender where
-  pixel p = let (V2 x y) = realToFrac <$> p in Variable
-    { setEnv = \ color -> do
+  pixel p = let (V2 x y) = realToFrac <$> p in ConfigState
+    { setConfig = \ color -> do
         rasterMode x y
         cairoRender $ cairoSetPoint (V2 x y) color
-    , getEnv = cairoRender (cairoFlush >> cairoGetPoint (V2 x y))
+    , getConfig = cairoRender (cairoFlush >> cairoGetPoint (V2 x y))
     }
 
   tempContext = cairoPreserve
@@ -475,14 +475,14 @@ instance Happlet2DGraphics CairoRender where
 
   stroke = cairoDrawWithSource canvasStrokeColor Cairo.stroke
 
-  blitOperator = Variable
-    { setEnv = cairoRender . Cairo.setOperator . \ case
+  blitOperator = ConfigState
+    { setConfig = cairoRender . Cairo.setOperator . \ case
         BlitSource   -> Cairo.OperatorSource
         BlitOver     -> Cairo.OperatorOver
         BlitXOR      -> Cairo.OperatorXor
         BlitAdd      -> Cairo.OperatorAdd
         BlitSaturate -> Cairo.OperatorSaturate
-    , getEnv = cairoRender $ Cairo.getOperator >>= \ case
+    , getConfig = cairoRender $ Cairo.getOperator >>= \ case
         Cairo.OperatorSource   -> return BlitSource
         Cairo.OperatorOver     -> return BlitOver
         Cairo.OperatorXor      -> return BlitXOR
@@ -491,15 +491,15 @@ instance Happlet2DGraphics CairoRender where
         op -> fail $ "Using a Cairo blit operator not known to Happlets: "++show op
     }
 
-  fillColor = variableFromLens canvasFillColor
+  fillColor = configStateWithLens canvasFillColor
 
-  strokeColor = variableFromLens canvasStrokeColor
+  strokeColor = configStateWithLens canvasStrokeColor
 
-  clipRegion = Variable
-    { setEnv = \ rect -> do
+  clipRegion = ConfigState
+    { setConfig = \ rect -> do
         cairoClipRect .= rect
         cairoRender $ Cairo.resetClip >> cairoRectangle (toRational <$> rect) >> Cairo.clip
-    , getEnv = use cairoClipRect
+    , getConfig = use cairoClipRect
     }
 
   clearScreen = unpackRGBA32Color >>> \ (r,g,b,a) -> cairoRender $ cairoClearCanvas r g b a
@@ -507,10 +507,10 @@ instance Happlet2DGraphics CairoRender where
 ----------------------------------------------------------------------------------------------------
 
 instance Happlet2DGeometry CairoRender Double where
-  shape            = variableFromLens (cairoGeometry . cairoShape)
-  strokeWeight     = variableFromLens (cairoGeometry . cairoLineWidth)
-  blitTransform    = variableFromLens (cairoGeometry . cairoBlitTransform)
-  patternTransform = variableFromLens (cairoGeometry . cairoPatternTransform)
+  shape            = configStateWithLens (cairoGeometry . cairoShape)
+  strokeWeight     = configStateWithLens (cairoGeometry . cairoLineWidth)
+  blitTransform    = configStateWithLens (cairoGeometry . cairoBlitTransform)
+  patternTransform = configStateWithLens (cairoGeometry . cairoPatternTransform)
 
 ----------------------------------------------------------------------------------------------------
 

@@ -38,7 +38,6 @@ import           Happlets.Model.Audio
 --import           Happlets.Model.GUI
 import           Happlets.View
 import           Happlets.View.Audio
-import           Happlets.Provider
 import           Happlets.Provider.Cairo      hiding (mkLogger)
 import           Happlets.Provider.ALSA
 import           Happlets.Provider.Gtk2.Debug
@@ -153,7 +152,7 @@ data GtkWindowLive
 
 data Gtk2Provider
   = Gtk2Provider
-    { currentConfig           :: !Config
+    { currentConfig           :: !HappletInitConfig
     , thisWindow              :: !(ProviderStateLock Gtk2Provider)
       -- ^ While a GUI function is evaluating, 'theGUIProvider' is always locked, i.e. set to the
       -- 'GtkLockedWin' state. This is problematic for spawning new threads, because the new thread
@@ -390,10 +389,10 @@ instance MonadIO GtkState where
 --      return a
 
 -- | Create the window and install the permanent event handlers.
-gtkNewWindow :: Config -> IO (ProviderStateLock Gtk2Provider)
+gtkNewWindow :: HappletInitConfig -> IO (ProviderStateLock Gtk2Provider)
 gtkNewWindow cfg = do
   logIO <- mkLogger "createWin"
-  forM_ (configErrorsOnLoad cfg) (hPrint stderr)
+  forM_ (initConfigErrorsOnLoad cfg) (hPrint stderr)
   -- new window --
   logIO _setup $ "Gtk.windowNew"
   window <- Gtk.windowNew
@@ -403,14 +402,14 @@ gtkNewWindow cfg = do
   Gtk.widgetSetAppPaintable window True
   logIO _setup $ "Gtk.widgetSetDoubleBuffered window False"
   Gtk.widgetSetDoubleBuffered window False
-  when (isJust $ cfg ^. backgroundTransparency) $
+  when (isJust $ cfg ^. initBackgroundTransparency) $
     mkAlphaChannel logIO $ Gtk.castToWidget window
   logIO _setup $ "Gtk.windowSetTypeHint GtkWindowTtypeHintNormal"
   Gtk.windowSetTypeHint window Gtk.WindowTypeHintNormal
   logIO _setup $ "Gtk.windowSetDefaultSize " ++ show (cfg ^. recommendWindowSize)
   uncurry (Gtk.windowSetDefaultSize window) $ cfg ^. recommendWindowSize
-  logIO _setup $ "Gtk.windowSetDecorated " ++ show (cfg ^. decorateWindow)
-  Gtk.windowSetDecorated window $ cfg ^. decorateWindow
+  logIO _setup $ "Gtk.windowSetDecorated " ++ show (cfg ^. initDecorateWindow)
+  Gtk.windowSetDecorated window $ cfg ^. initDecorateWindow
   eventBox <- Gtk.eventBoxNew
   Gtk.eventBoxSetVisibleWindow eventBox False
   Gtk.eventBoxSetAboveChild    eventBox True
@@ -647,11 +646,11 @@ resizeGtkDrawContext canvas size = do
 -- | Allocates a new 'GtkWindowLive', including the 'Gtk.Pixmap' buffer and 'Gtk.GC' graphics
 -- context. The buffer allocated will be exactly the dimensions given without checking if the size
 -- is valid, and invalid demensions will crash the thread.
-newGtkWindowLive :: Config -> Gtk.DrawWindow -> (Int, Int) -> IO GtkWindowLive
+newGtkWindowLive :: HappletInitConfig -> Gtk.DrawWindow -> (Int, Int) -> IO GtkWindowLive
 newGtkWindowLive cfg canvas (w, h) = do
   logIO <- mkLogger "gtkAllocNewPixmap"
 #if USE_CAIRO_SURFACE_BUFFER
-  let depth = if isJust $ cfg ^. backgroundTransparency
+  let depth = if isJust $ cfg ^. initBackgroundTransparency
         then Cairo.FormatARGB32
         else Cairo.FormatRGB24
   logIO _winevt $ unwords ["Cairo.createImageSurface", show depth, show w, show h]
@@ -683,12 +682,12 @@ newGtkWindowLive cfg canvas (w, h) = do
 -- @draw@ type is 'GtkDraw' (a Cairo 'Graphics.Rendering.Cairo.Render' function).
 type GtkGUI model = GUI Gtk2Provider model
 
-gtkWindowVisible :: Variable (GtkGUI model) Bool
-gtkWindowVisible = Variable
-  { setEnv = \ visible -> liftGUIProvider $ gets gtkWindow >>= \ win -> liftIO $
+gtkWindowVisible :: ConfigState (GtkGUI model) Bool
+gtkWindowVisible = ConfigState
+  { setConfig = \ visible -> liftGUIProvider $ gets gtkWindow >>= \ win -> liftIO $
       if not visible then Gtk.widgetHideAll win else
       Gtk.widgetShowAll win >> Gtk.widgetQueueDraw win
-  , getEnv = liftGUIProvider $ gets gtkWindow >>= liftIO . Gtk.widgetGetVisible
+  , getConfig = liftGUIProvider $ gets gtkWindow >>= liftIO . Gtk.widgetGetVisible
   }
 
 -- | This is the function behind the Happlet public API 'Happlets.Initialize.attachWindow'.
@@ -823,8 +822,8 @@ instance Managed Gtk2Provider where
         return $ Glib.signalDisconnect focin >> Glib.signalDisconnect focout
     , eventGUIReaction  = react
     }
-  windowSize = Variable
-    { getEnv = liftGUIProvider $ do
+  windowSize = ConfigState
+    { getConfig = liftGUIProvider $ do
         win <- gets gtkWindow
         liftIO $ do
           (x, y) <- Gtk.windowGetPosition win
@@ -832,7 +831,7 @@ instance Managed Gtk2Provider where
           return $ rect2D
             & rect2DHead . pointXY .~ (sampCoord x, sampCoord y)
             & rect2DTail . pointXY .~ (sampCoord x + sampCoord w, sampCoord y + sampCoord h)
-    , setEnv = \ rect -> liftGUIProvider $ do
+    , setConfig = \ rect -> liftGUIProvider $ do
         win <- gets gtkWindow
         liftIO $ do
           let f = fromIntegral :: SampCoord -> Int
@@ -842,11 +841,11 @@ instance Managed Gtk2Provider where
           Gtk.windowMove   win (f x) (f y)
           Gtk.windowResize win (f w) (f h)
     }
-  windowDecorated = Variable
-    { getEnv = liftGUIProvider $ do
+  windowDecorated = ConfigState
+    { getConfig = liftGUIProvider $ do
         win <- gets gtkWindow
         liftIO $ Gtk.windowGetDecorated win
-    , setEnv = \ bool -> liftGUIProvider $ do
+    , setConfig = \ bool -> liftGUIProvider $ do
         win <- gets gtkWindow
         liftIO $ Gtk.windowSetDecorated win bool
     }
@@ -859,8 +858,8 @@ instance CanResize Gtk2Provider where
     (simpleSetup resizeReaction $ uncurry react)
     { eventPreInstall = cairoRenderState . canvasResizeMode .= mode
     }
-  windowResizeMode = fmapVariableMonad liftGUIProvider $
-    variableFromLens (cairoRenderState . canvasResizeMode)
+  windowResizeMode = fmapConfigStateMonad liftGUIProvider $
+    configStateWithLens (cairoRenderState . canvasResizeMode)
 
 data AnimationThreadControl
   = AnimationThreadControl
@@ -879,7 +878,7 @@ instance CanAnimate Gtk2Provider where
       , eventLensReaction = animatorThread
       , eventPreInstall   = return ()
       , eventInstall      = \ env next -> do
-          let rate = env & theAnimationFrameRate . currentConfig
+          let rate = env & view animationFrameRate . currentConfig
           t0    <- getCurrentTime
           t0ref <- newIORef AnimationThreadControl
             { animationThreadAlive = True
@@ -1287,9 +1286,9 @@ instance HappletWindow Gtk2Provider CairoRender where
 
   onOSBuffer                = liftGUIProvider . evalCairoOnGtkDrawable
 
-  windowClipRegion          = Variable
-    { getEnv = onCanvas $ CairoRender $ Just <$> use cairoClipRect
-    , setEnv = \ case
+  windowClipRegion          = ConfigState
+    { getConfig = onCanvas $ CairoRender $ Just <$> use cairoClipRect
+    , setConfig = \ case
         Nothing   -> do
           winsize <- liftGUIProvider $ do
             livewin <- gets gtkWindowLive
@@ -1337,9 +1336,9 @@ instance HappletWindow Gtk2Provider CairoRender where
           Cairo.paint
 
 instance HappletPixelBuffer Gtk2Provider CairoRender where
-  imageCanvasResizeMode = Variable
-    { setEnv = \ mode -> onCanvas $ canvasResizeMode .= mode
-    , getEnv = onCanvas $ use canvasResizeMode
+  imageCanvasResizeMode = ConfigState
+    { setConfig = \ mode -> onCanvas $ canvasResizeMode .= mode
+    , getConfig = onCanvas $ use canvasResizeMode
     }
 
   resizeImageBuffer size@(V2 w h) redraw = onCanvas $ do
@@ -1422,20 +1421,18 @@ instance AudioPlayback (GUI Gtk2Provider model) where
 -- 'Happlets.GUI.runGUI' in the @main@ function of your Happlet program.
 gtkHapplet :: Provider Gtk2Provider
 gtkHapplet = Provider
-  { defaultConfig = Config
-      { theConfigErrorsOnLoad      = []
-      , theConfigFilePath          = ""
-      , theRegisteredAppName       = "Happlet"
-      , theWindowTitleBar          = "Happlet"
-      , theBackgroundTransparency  = Just 0.9
-      , theBackgroundGreyValue     = 1.0
-      , theRecommendWindowPosition = (0, 30)
-      , theRecommendWindowSize     = (800, 600)
-      , theAnimationFrameRate      = gtkAnimationFrameRate
-      , willDecorateWindow         = True
-      , willQuitOnWindowClose      = True
-      , willDeleteWindowOnClose    = False
-      }
+  { defaultConfig = happletInitConfig &~ do
+      initConfigFilePath         .= ""
+      registeredAppName          .= "Happlet"
+      initWindowTitleBar         .= "Happlet"
+      initBackgroundTransparency .= Just 0.9
+      initBackgroundGreyValue    .= 1.0
+      recommendWindowPosition    .= (0, 30)
+      recommendWindowSize        .= (800, 600)
+      animationFrameRate         .= gtkAnimationFrameRate
+      initDecorateWindow         .= True
+      quitOnWindowClose          .= True
+      deleteWindowOnClose        .= True
   , doInitializeGUI         = gtkInit
   , doGUIEventLoopLaunch    = gtkLaunchEventLoop
   , doProviderNew           = gtkNewWindow
@@ -1462,7 +1459,7 @@ gtkInit = do
 -- | Launch the Gtk+ main event loop. This function is usually called via the
 -- 'Happlets.Initialize.launchGUIEventLoop' function, which is automatically called by the
 -- 'Happlets.Initialize.happlet' function.
-gtkLaunchEventLoop :: Config -> IO ()
+gtkLaunchEventLoop :: HappletInitConfig -> IO ()
 gtkLaunchEventLoop cfg = do
   logIO <- mkLogger "gtkEventLoop"
   let appName = cfg ^. registeredAppName
