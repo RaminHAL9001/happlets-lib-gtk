@@ -100,6 +100,7 @@ data CairoRenderState
     , theCanvasResizeMode        :: !CanvasResizeMode
     , theCanvasFillColor         :: !PaintSource
     , theCanvasStrokeColor       :: !PaintSource
+    , theCanvasBlitOperator      :: !BlitOperator
     , theCairoGeometry           :: !(CairoGeometry Double)
     , theCairoClipRect           :: !(Rect2D SampCoord)
     , theCairoRenderMode         :: !CairoRenderMode
@@ -115,6 +116,9 @@ canvasFillColor = lens theCanvasFillColor $ \ a b -> a{ theCanvasFillColor = b }
 
 canvasStrokeColor :: Lens' CairoRenderState PaintSource
 canvasStrokeColor = lens theCanvasStrokeColor $ \ a b -> a{ theCanvasStrokeColor = b }
+
+canvasBlitOperator :: Lens' CairoRenderState BlitOperator
+canvasBlitOperator = lens theCanvasBlitOperator $ \ a b -> a{ theCanvasBlitOperator = b }
 
 cairoGeometry :: Lens' CairoRenderState (CairoGeometry Double)
 cairoGeometry = lens theCairoGeometry $ \ a b -> a{ theCairoGeometry = b }
@@ -341,8 +345,11 @@ cairoDrawWithSource paint draw = let f = realToFrac in do
         GradLinear (V2 x1 y1) (V2 x2 y2) ->
           Cairo.withLinearPattern (f x1) (f y1) (f x2) (f y2) gradStops
   geom <- use cairoGeometry
+  use canvasBlitOperator >>= setConfig cairoBlitOperator
+  use cairoClipRect >>= setConfig cairoClipRegion
   vectorMode
   cairoRender $ do
+    Cairo.resetClip
     Cairo.setLineWidth $ geom ^. cairoLineWidth
     Cairo.setMatrix $ m44toCairoMatrix $ geom ^. cairoBlitTransform
     cairoDrawShape $ geom ^. cairoShape
@@ -366,8 +373,8 @@ cairoDrawLine color width line = do
   cairoSetColor color
   Cairo.setLineCap Cairo.LineCapRound
   Cairo.setLineWidth $ realToFrac width
-  cairoMoveTo $ line ^. line2DHead
-  cairoLineTo $ line ^. line2DTail
+  cairoMoveTo $ line ^. line2DTail
+  cairoLineTo $ line ^. line2DHead
   Cairo.stroke
 
 -- | Similar to 'cairoDrawLine' but draws multiple line segments, each next segment beginning where
@@ -389,10 +396,10 @@ cairoDrawPath color width =
 
 cairoRectangle :: RealFrac n => Rect2D n -> Cairo.Render ()
 cairoRectangle rect = do
-  cairoMoveTo $ rect ^. rect2DHead
-  let (head, tail) = (realToFrac <$> canonicalRect2D rect) ^. rect2DPoints
-  let (x, y) = head ^. pointXY
-  let (w, h) = (tail - head) ^. pointXY
+  cairoMoveTo $ rect ^. rect2DTail
+  let (tail, head) = (realToFrac <$> canonicalRect2D rect) ^. rect2DPoints
+  let (x, y) = tail ^. pointXY
+  let (w, h) = (head - tail) ^. pointXY
   Cairo.rectangle x y w h
 
 cairoDrawRect
@@ -475,42 +482,48 @@ instance Happlet2DGraphics CairoRender where
 
   stroke = cairoDrawWithSource canvasStrokeColor Cairo.stroke
 
-  blitOperator = ConfigState
-    { setConfig = cairoRender . Cairo.setOperator . \ case
-        BlitSource   -> Cairo.OperatorSource
-        BlitOver     -> Cairo.OperatorOver
-        BlitXOR      -> Cairo.OperatorXor
-        BlitAdd      -> Cairo.OperatorAdd
-        BlitSaturate -> Cairo.OperatorSaturate
-    , getConfig = cairoRender $ Cairo.getOperator >>= \ case
-        Cairo.OperatorSource   -> return BlitSource
-        Cairo.OperatorOver     -> return BlitOver
-        Cairo.OperatorXor      -> return BlitXOR
-        Cairo.OperatorAdd      -> return BlitAdd
-        Cairo.OperatorSaturate -> return BlitSaturate
-        op -> fail $ "Using a Cairo blit operator not known to Happlets: "++show op
-    }
-
-  fillColor = configStateWithLens canvasFillColor
-
-  strokeColor = configStateWithLens canvasStrokeColor
-
-  clipRegion = ConfigState
-    { setConfig = \ rect -> do
-        cairoClipRect .= rect
-        cairoRender $ Cairo.resetClip >> cairoRectangle (toRational <$> rect) >> Cairo.clip
-    , getConfig = use cairoClipRect
-    }
-
   clearScreen = unpackRGBA32Color >>> \ (r,g,b,a) -> cairoRender $ cairoClearCanvas r g b a
+
+instance Happlet2DHasDrawing CairoRenderState where
+  blitOperator = canvasBlitOperator
+  fillColor = canvasFillColor
+  strokeColor = canvasStrokeColor
+  clipRegion = cairoClipRect
+
+-- | Calls the internal Cairo API function 'Cairo.clip' to update the clip region state.
+cairoClipRegion :: ConfigState CairoRender (Rect2D SampCoord)
+cairoClipRegion = ConfigState
+  { setConfig = \ rect -> do
+      cairoClipRect .= rect
+      cairoRender $ Cairo.resetClip >> cairoRectangle (toRational <$> rect) >> Cairo.clip
+  , getConfig = use cairoClipRect
+  }
+
+-- | Calls the internal Cairo API function 'Cairo.setOperator' to update the blit operator state.
+cairoBlitOperator :: ConfigState CairoRender BlitOperator
+cairoBlitOperator = ConfigState
+  { setConfig = cairoRender . Cairo.setOperator . \ case
+      BlitSource   -> Cairo.OperatorSource
+      BlitOver     -> Cairo.OperatorOver
+      BlitXOR      -> Cairo.OperatorXor
+      BlitAdd      -> Cairo.OperatorAdd
+      BlitSaturate -> Cairo.OperatorSaturate
+  , getConfig = cairoRender $ Cairo.getOperator >>= \ case
+      Cairo.OperatorSource   -> return BlitSource
+      Cairo.OperatorOver     -> return BlitOver
+      Cairo.OperatorXor      -> return BlitXOR
+      Cairo.OperatorAdd      -> return BlitAdd
+      Cairo.OperatorSaturate -> return BlitSaturate
+      op -> fail $ "Using a Cairo blit operator not known to Happlets: "++show op
+  }
 
 ----------------------------------------------------------------------------------------------------
 
-instance Happlet2DGeometry CairoRender Double where
-  shape            = configStateWithLens (cairoGeometry . cairoShape)
-  strokeWeight     = configStateWithLens (cairoGeometry . cairoLineWidth)
-  blitTransform    = configStateWithLens (cairoGeometry . cairoBlitTransform)
-  patternTransform = configStateWithLens (cairoGeometry . cairoPatternTransform)
+instance Happlet2DGeometry CairoRenderState Double where
+  shape            = cairoGeometry . cairoShape
+  strokeWeight     = cairoGeometry . cairoLineWidth
+  blitTransform    = cairoGeometry . cairoBlitTransform
+  patternTransform = cairoGeometry . cairoPatternTransform
 
 ----------------------------------------------------------------------------------------------------
 

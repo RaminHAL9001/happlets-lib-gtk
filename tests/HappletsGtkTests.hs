@@ -23,7 +23,7 @@ data TestSuite
 main :: IO ()
 main = happlet gtkHapplet $ do
   registeredAppName   .= "Happlets-Test"
-  windowTitleBar      .= "Happlets Test"
+  initWindowTitleBar  .= "Happlets Test"
   recommendWindowSize .= (640, 480)
   quitOnWindowClose   .= True
 
@@ -72,15 +72,15 @@ redGridDraw :: Double -> PixSize -> CairoRender ()
 redGridDraw scale winsize = do
   let (V2 w h) = realToFrac <$> winsize
   if scale <= 1 then clearScreen red else do
-    let mkLine v2 top i = Draw2DLine $ line2D & (line2DHead .~ v2 i 0) & (line2DTail .~ v2 i top)
+    let mkLine v2 top i = Draw2DLine $ line2D & (line2DTail .~ v2 i 0) & (line2DHead .~ v2 i top)
     clearScreen (black & alphaChannel .~ 0.9)
-    setEnv strokeWeight (1.0 :: Double)
-    setEnv strokeColor $ PaintSolidColor red
+    strokeWeight .= (1.0 :: Double)
+    strokeColor  .= PaintSolidColor red
     forM_ [0::Int .. floor (w / scale)] $ \ i -> do
-      setEnv shape $ mkLine V2 h $ 0.5 + scale * realToFrac i
+      shape .= mkLine V2 h (0.5 + scale * realToFrac i)
       stroke
     forM_ [0::Int .. floor (h / scale)] $ \ i -> do
-      setEnv shape $ mkLine (flip V2) w $ 0.5 + scale * realToFrac i
+      shape .= mkLine (flip V2) w (0.5 + scale * realToFrac i)
       stroke
     void $ screenPrinter $
       withFontStyle (do{ fontForeColor .= white; fontSize .= 16.0; }) $ do
@@ -101,14 +101,14 @@ redGridGUI ctx _size = do
     use lastMouse >>= \ case
       Nothing         -> return ()
       Just (V2 x0 y0) -> refreshRegion
-        [rect2D & rect2DHead .~ V2 (x0 - 22) (y0 - 22) & rect2DTail .~ V2 (x0 + 22) (y0 + 22)]
+        [rect2D & rect2DTail .~ V2 (x0 - 22) (y0 - 22) & rect2DHead .~ V2 (x0 + 22) (y0 + 22)]
     if down
      then do
       case button of
         RightClick -> switchToPulseCircle ctx
         LeftClick  -> do
           redGridScale %= \ scale -> if scale <= 4.0 then 64.0 else scale / 2.0
-          getEnv windowSize >>= draw . rect2DSize
+          getConfig windowSize >>= draw . rect2DSize
         _          -> return ()
       scale <- use redGridScale
       mb <- use mouseBox
@@ -131,7 +131,7 @@ redGridGUI ctx _size = do
       Cairo.arc (realToFrac x1 + 0.5) (realToFrac y1 + 0.5) 20.0 0 (2*pi)
       Cairo.stroke
     lastMouse .= Just pt1
-  getEnv windowSize >>= draw . rect2DSize
+  getConfig windowSize >>= draw . rect2DSize
 
 ----------------------------------------------------------------------------------------------------
 

@@ -38,6 +38,7 @@ import           Happlets.Model.Audio
 --import           Happlets.Model.GUI
 import           Happlets.View
 import           Happlets.View.Audio
+
 import           Happlets.Provider.Cairo      hiding (mkLogger)
 import           Happlets.Provider.ALSA
 import           Happlets.Provider.Gtk2.Debug
@@ -431,6 +432,7 @@ gtkNewWindow cfg = do
               , theCanvasFillColor     = PaintSolidColor white
               , theCanvasStrokeColor   = PaintSolidColor black
               , theCanvasResizeMode    = CanvasResizeClear
+              , theCanvasBlitOperator  = BlitSource
               , theGtkCairoSurface     = Nothing
               , theCairoGeometry       = CairoGeometry
                   { theCairoShape            = Draw2DReset
@@ -829,14 +831,14 @@ instance Managed Gtk2Provider where
           (x, y) <- Gtk.windowGetPosition win
           (w, h) <- Gtk.windowGetSize     win
           return $ rect2D
-            & rect2DHead . pointXY .~ (sampCoord x, sampCoord y)
-            & rect2DTail . pointXY .~ (sampCoord x + sampCoord w, sampCoord y + sampCoord h)
+            & rect2DTail . pointXY .~ (sampCoord x, sampCoord y)
+            & rect2DHead . pointXY .~ (sampCoord x + sampCoord w, sampCoord y + sampCoord h)
     , setConfig = \ rect -> liftGUIProvider $ do
         win <- gets gtkWindow
         liftIO $ do
           let f = fromIntegral :: SampCoord -> Int
-          let (x , y ) = rect ^. rect2DHead . pointXY
-          let (x1, y1) = rect ^. rect2DTail . pointXY
+          let (x , y ) = rect ^. rect2DTail . pointXY
+          let (x1, y1) = rect ^. rect2DHead . pointXY
           let (w , h ) = (x1 - x, y1 - y)
           Gtk.windowMove   win (f x) (f y)
           Gtk.windowResize win (f w) (f h)
@@ -1302,10 +1304,10 @@ instance HappletWindow Gtk2Provider CairoRender where
           cairoClipRect .= rect
           cairoRender $ do
             Cairo.save
-            let head = rect ^. rect2DHead
             let tail = rect ^. rect2DTail
-            let (x, y) = head ^. pointXY
-            let (w, h) = (tail - head) ^. pointXY
+            let head = rect ^. rect2DHead
+            let (x, y) = tail ^. pointXY
+            let (w, h) = (head - tail) ^. pointXY
             let f (SampCoord x) = realToFrac x
             Cairo.rectangle (f x) (f y) (f w) (f h)
             Cairo.clip
@@ -1320,8 +1322,8 @@ instance HappletWindow Gtk2Provider CairoRender where
           forM_ (fmap realToFrac . canonicalRect2D <$> rects) $ \ rect -> do
             Cairo.setOperator Cairo.OperatorSource
             Cairo.setSourceSurface (theCairoSurface livest) (0.0) (0.0)
-            let (x, y) = (rect) ^. rect2DHead . pointXY
-            let (w, h) = ((rect ^. rect2DTail) - (rect ^. rect2DHead)) ^. pointXY
+            let (x, y) = rect ^. rect2DTail . pointXY
+            let (w, h) = ((rect ^. rect2DHead) - (rect ^. rect2DTail)) ^. pointXY
             Cairo.rectangle x y w h
             Cairo.fill
 
