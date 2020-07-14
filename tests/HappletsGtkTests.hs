@@ -29,7 +29,6 @@ main = happlet gtkHapplet $ do
 
   mvar        <- liftIO $ newMVar "Main"
   thisThread  <- liftIO myThreadId
-  gtk         <- newProvider
   pulsecircle <- newHapplet PulseCircle
     { thePulseCircleRadius     = 20
     , thePulseCirclePosition   = V2 (-1) (-1)
@@ -47,7 +46,7 @@ main = happlet gtkHapplet $ do
         , switchToRedGrid      = changeRootHapplet redgrid     $ redGridGUI     testSuite
         }
 
-  attachWindow gtk True redgrid $ redGridGUI testSuite
+  attachWindow True redgrid $ redGridGUI testSuite
 
 ----------------------------------------------------------------------------------------------------
 
