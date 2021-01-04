@@ -1,10 +1,12 @@
 module Happlets.Provider.Cairo where
 
 import           Happlets
+import           Happlets.View.Color (black)
 import           Happlets.Provider.Gtk2.Debug
 
 import           Control.Arrow
 import           Control.Concurrent
+import           Control.Lens (modifying)
 
 import           Data.Array.MArray
 import           Data.Bits
@@ -68,7 +70,7 @@ data CairoRenderMode
 
 data CairoGeometry n
   = CairoGeometry
-    { theCairoShape            :: !(Draw2DShape n)
+    { theCairoShape            :: !(Draw2DPrimitive n)
     , theCairoLineWidth        :: !(LineWidth n)
     , theCairoBlitTransform    :: !(Transform2D n)
     , theCairoPatternTransform :: !(Transform2D n)
@@ -82,7 +84,7 @@ instance Map2DShape CairoGeometry where
     , theCairoPatternTransform = fmap (fmap f) $ theCairoPatternTransform geom
     }
 
-cairoShape :: Lens' (CairoGeometry n) (Draw2DShape n)
+cairoShape :: Lens' (CairoGeometry n) (Draw2DPrimitive n)
 cairoShape = lens theCairoShape $ \ a b -> a{ theCairoShape = b }
 
 cairoLineWidth :: Lens' (CairoGeometry n) (LineWidth n)
@@ -439,15 +441,6 @@ cairoCubic = cubic2DPoints >>> \ (init, segments) -> do
     let (V2   endX   endY) = seg ^. cubic2DEndPoint
     Cairo.curveTo ctrl1X ctrl1Y ctrl2X ctrl2Y endX endY
 
-cairoDrawShape :: (UVec.Unbox n, RealFrac n) => Draw2DShape n -> Cairo.Render ()
-cairoDrawShape = \ case
-  Draw2DReset -> return ()
-  Draw2DLine (Line2D from to) -> cairoMoveTo from >> cairoLineTo to
-  Draw2DRect  rect -> cairoRectangle rect
-  Draw2DArc   arc  -> cairoArc arc
-  Draw2DPath  path -> cairoPath path
-  Draw2DCubic path -> cairoCubic path
-
 -- | This is a helpful function you can use for your 'Happlet.Control.controlRedraw' function to clear
 -- the window with a background color, given by the four 'Prelude.Double' parameters for Red, Green,
 -- Blue, and Alpha (in that order).
@@ -478,17 +471,132 @@ instance Happlet2DGraphics CairoRender where
     Cairo.setOperator Cairo.OperatorSource
     cairoResetAntialiasing
 
-  fill = cairoDrawWithSource canvasFillColor Cairo.fill
-
-  stroke = cairoDrawWithSource canvasStrokeColor Cairo.stroke
-
   clearScreen = unpackRGBA32Color >>> \ (r,g,b,a) -> cairoRender $ cairoClearCanvas r g b a
 
-instance Happlet2DHasDrawing CairoRenderState where
-  blitOperator = canvasBlitOperator
-  fillColor = canvasFillColor
-  strokeColor = canvasStrokeColor
-  clipRegion = cairoClipRect
+  draw2D clipBounds primitives = cairoPreserve $ do
+    maybe (pure ()) (setConfig cairoClipRegion) clipBounds
+    forM_ primitives cairoDrawPrimitive
+
+  --fill = cairoDrawWithSource canvasFillColor Cairo.fill
+  --stroke = cairoDrawWithSource canvasStrokeColor Cairo.stroke
+
+--instance Happlet2DHasDrawing CairoRenderState where
+--  blitOperator = canvasBlitOperator
+--  fillColor = canvasFillColor
+--  strokeColor = canvasStrokeColor
+--  clipRegion = cairoClipRect
+
+cairoPaintSource :: PaintSource SampCoord -> CairoRender () -> CairoRender ()
+cairoPaintSource d render = do
+  setConfig cairoBlitOperator $ thePaintSourceBlit d
+  cairoEvalPaintFunction (thePaintSourceFunction d) render
+
+cairoEvalPaintFunction :: PaintSourceFunction SampCoord -> Cairo.Render () -> CairoRender ()
+cairoEvalPaintFunction source runPaint = case source of
+  SolidColorSource color -> do
+    cairoSetColor color
+    cairoRender runPaint
+  GradientSource (trans2D@(Transform2D{theDrawing2D=grad})) ->
+    let f = realToFrac :: Float -> Double in
+    ( case thePaintGradType grad of
+        GradLinear (V2 x0 y0) (V2 x1 y1) ->
+          Cairo.withLinearPattern (f x0) (f y0) (f x1) (f y1)
+        GradRadial (V2 x0 y0) (Magnitude r0) (V2 x1 y1) (Magnitude r1) ->
+          Cairo.withRadialPattern (f x0) (f y0) (f r0) (f x1) (f y1) (f r1)
+    ) $ runPaint
+  PixelBufferSource   () -> do -- TODO: this will change
+    cairoSetColor black
+    cairoRender runPaint
+
+-- | Sets the Cairo 'Cairo.Pattern' gradient color stops.
+cairoPaintGradient :: Cairo.Pattern -> Transform2D SampCoord PaintGradient -> CairoRender ()
+cairoPaintGradient pat (Transform2D{theTransform2D=m44,theDrawing2D=grad}) = cairoRender $ do
+  let f = realToFrac :: Float -> Double
+  let (r1,g1,b1,a1) = unpackRGBA32Color end
+  Cairo.withRGBAPattern r1 g1 b1 a1 $ \ pat -> do
+    Cairo.patternSetMatrix pat (cairoMatrix44 m44)
+    let (r0,g0,b0,a0) = unpackRGBA32Color start
+    Cairo.patternAddColorStopRGBA pat 0.0 r0 g0 b0 a0
+    forM_ (gradStopsToList stops) $ \ stop -> do
+       let (r,g,b,a) = unpackRGBA32Color $ theGradStopColor stop
+       Cairo.patternAddColorStop pat (theGradStopPoint stop) r g b a
+    Cairo.patternAddColorStopRGBA pat 1.0 r1 g1 b1 a1
+
+cairoMatrix44 :: M44 SampCoord -> Cairo.Matrix
+cairoMatrix44 (V4 (V4 xx yx _ _) (V4 xy yy _ _) (V4 x0 y0 _ _) _) =
+  Cairo.Matrix
+  { Cairo.xx = xx, Cairo.xy = xy
+  , Cairo.yx = yx, Cairo.yy = yy
+  , Cairo.x0 = x0, Cairo.y0 = y0
+  }
+
+cairoFillStroke :: Draw2DFillStroke SampCoord -> CairoRender ()
+cairoFillStroke = \ case
+  FillOnly   a   -> cairoPaintSource a Cairo.fill
+  StrokeOnly b   -> cairoPaintSource b Cairo.stroke
+  FillStroke a b -> cairoPaintSource a Cairo.fillPreserve >> cairoPaintSource b Cairo.stroke
+  StrokeFill b a -> cairoPaintSource b Cairo.strokePreserve >> cairoPaintSource a Cairo.fill
+
+cairoDrawPrimitive :: Draw2DPrimitive SampCoord -> CairoRender ()
+cairoDrawPrimitive = \ case
+  Draw2DReset             -> return ()
+  Draw2DLine  paint shape -> do
+    cairo2DLine shape
+    cairoPaintSource paint Cairo.stroke
+  Draw2DRect  paint shape -> do
+    cairo2DRect shape
+    cairoFillStroke paint
+  Draw2DArc   paint shape -> do
+    cairo2DArc shape
+    cairoFillStroke paint
+  Draw2DPath  paint shape -> do
+    cairo2DPath shape
+    cairoFillStroke paint
+  Draw2DCubic paint shape -> do
+    cairo2DCubeic shape
+    cairoFillStroke paint
+
+cairo2DLine :: Line2D SampCoord -> CairoRender ()
+cairo2DLine d = cairoRender $ do
+  let f = (0.5 +) . realToFrac :: SampCoord -> Double
+  let (V2 x0 y0) = d ^. line2DTail
+  Cairo.moveTo x0 y0
+  let (V2 x1 y1) = d ^. line2DHead
+  Cairo.moveTo x1 y1
+
+cairo2DRect :: Rect2D SampCoord -> CairoRender ()
+cairo2DRect d = cairoRender $ do
+  let f = realToFrac :: SampCoord -> Double
+  let (V2 x y) = d ^. rect2DTail
+  let (V2 w h) = d ^. rect2DSize
+  Cairo.rectangle (f x) (f y) (f w) (f h)
+
+cairo2DArc :: Arc2D SampCoord -> CairoRender ()
+cairo2DArc d = cairoRender $ do
+  let f = realToFrac :: SampCoord -> Double
+  let (V2 x y) = d ^. arc2DOrigin
+  let (Magnitude r) = d ^. arc2DRadius
+  let (StartAngle a) = d ^. arc2DStart
+  let (EndAngle b) = d ^. arc2DEnd
+  (if r < 0 then Cairo.arcNegative else Cairo.arc)
+    (f x) (f y) ((if r < 0 then negate else id) (f r)) (f start) (f end)
+
+cairo2DPath :: Path2D SampCoord -> CairoRender ()
+cairo2DPath d = cairoRender $ do
+  let f = realToFrac :: SampCoord -> Double
+  let (V2 x y, points) = d ^. path2DPoints
+  Cairo.moveTo (f x) (f y)
+  forM_ points $ \ (V2 x y) -> Cairo.lineTo x y
+
+cairo2DCubic :: Cubic2D SampCoord -> CairoRender ()
+cairo2DCubic d = cairoRender $ do
+  let (V2 x y, segments) = d ^. cubic2DPoints
+  Cairo.moveTo (f x) (f y)
+  forM_ segments $ \ s -> do
+    let (V2 x1 y1) = s ^. cubic2DCtrlPt1
+    let (V2 x2 y2) = s ^. cubic2DCtlrPt2
+    let (V2 x3 y3) = s ^. cubic2DEndPoint
+    Cairo.curveTo (f x1) (f y1) (f x2) (f y2) (f x3) (f y3)
 
 -- | Calls the internal Cairo API function 'Cairo.clip' to update the clip region state.
 cairoClipRegion :: ConfigState CairoRender (Rect2D SampCoord)
@@ -516,14 +624,6 @@ cairoBlitOperator = ConfigState
       Cairo.OperatorSaturate -> return BlitSaturate
       op -> fail $ "Using a Cairo blit operator not known to Happlets: "++show op
   }
-
-----------------------------------------------------------------------------------------------------
-
-instance Happlet2DGeometry CairoRenderState Double where
-  shape            = cairoGeometry . cairoShape
-  strokeWeight     = cairoGeometry . cairoLineWidth
-  blitTransform    = cairoGeometry . cairoBlitTransform
-  patternTransform = cairoGeometry . cairoPatternTransform
 
 ----------------------------------------------------------------------------------------------------
 
