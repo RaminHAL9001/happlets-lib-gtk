@@ -174,8 +174,8 @@ data Gtk2Provider
     , theMouseHandler         :: !(ConnectReact GtkState Mouse)
     , theKeyHandler           :: !(ConnectReact GtkState Keyboard)
     , theDetatchHandler       :: !(ConnectReact GtkState ())
-    , theAnimatorThread       :: !(ConnectReact GtkState AnimationMoment)
-    , theContextSwitcher      :: !(GtkState (EventHandlerControl ()))
+    , theAnimatorThread       :: !(ConnectReact GtkState UTCTime)
+    , theContextSwitcher      :: !(GtkState (Consequence ()))
     }
 
 instance MonadProvider Gtk2Provider GtkState where
@@ -263,10 +263,10 @@ keyHandler = lens theKeyHandler $ \ a b -> a{ theKeyHandler = b }
 ---- the state is evaluated -- every single event handler will evaluate this function. To ensure that
 ---- nothing happens unless it is set, this lens is used to set the callback to @return ()@ (a no-op)
 ---- prior to evaluation of the 'GtkGUI' procedure in the 'liftGUIintoGtkState' function.
---gtk2ContextSwitcher :: Lens' Gtk2Provider (GtkState (EventHandlerControl ()))
+--gtk2ContextSwitcher :: Lens' Gtk2Provider (GtkState (Consequence ()))
 --gtk2ContextSwitcher = lens theContextSwitcher $ \ a b -> a{ theContextSwitcher = b }
 
-animatorThread :: Lens' Gtk2Provider (ConnectReact GtkState AnimationMoment)
+animatorThread :: Lens' Gtk2Provider (ConnectReact GtkState UTCTime)
 animatorThread = lens theAnimatorThread $ \ a b -> a{ theAnimatorThread = b }
 
 -- Create an image buffer with an alpha channel for a 'Graphics.UI.Gtk.Abstract.Widget.Widget' to
@@ -321,7 +321,7 @@ instance MonadIO GtkState where
 ---- function. If the 'Happlets.GUI.GUI' function evaluates to 'Happlets.GUI.disable' or
 ---- 'Happlets.GUI.failGUI', then this function returns 'Prelude.False'. Otherwise, 'Prelude.True' is
 ---- returned.
---liftGUIintoGtkState :: Happlet model -> GtkGUI model a -> GtkState (EventHandlerControl a)
+--liftGUIintoGtkState :: Happlet model -> GtkGUI model a -> GtkState (Consequence a)
 --liftGUIintoGtkState happlet f = do
 --  logIO <- mkLogger "liftGUIintoGtkState"
 --  -- (1) Always set 'contextSwitcher' to a no-op, it may be set to something else by @f@.
@@ -364,7 +364,7 @@ instance MonadIO GtkState where
 --  -> DebugTag
 --  -> String
 --  -> Lens' Gtk2Provider (ConnectReact event)
---  -> EventHandlerControl a
+--  -> Consequence a
 --  -> GtkState ()
 --checkGUIContinue logIO sel what connectReact = \ case
 --  EventHandlerHalt       ->
@@ -429,18 +429,12 @@ gtkNewWindow cfg = do
           , theCairoRenderState      = CairoRenderState
               { theCairoKeepWinSize    = V2 0 0
               , theCairoRenderMode     = VectorMode
-              , theCanvasFillColor     = PaintSolidColor white
-              , theCanvasStrokeColor   = PaintSolidColor black
+              , theCanvasFillColor     = paintColor white
+              , theCanvasStrokeColor   = paintColor black
               , theCanvasResizeMode    = CanvasResizeClear
               , theCanvasBlitOperator  = BlitSource
               , theGtkCairoSurface     = Nothing
-              , theCairoGeometry       = CairoGeometry
-                  { theCairoShape            = Draw2DReset
-                  , theCairoLineWidth        = 0
-                  , theCairoBlitTransform    = identity
-                  , theCairoPatternTransform = identity
-                  }
-              , theCairoClipRect = rect2D
+              , theCairoClipRect       = rect2D
               , theCairoScreenPrinterState = screenPrinterState
               }
           , theAudioPlaybackThread   = StereoPlaybackThread Nothing audio
@@ -453,7 +447,7 @@ gtkNewWindow cfg = do
           , theKeyHandler            = Disconnected
           , theDetatchHandler        = Disconnected
           , theAnimatorThread        = Disconnected
-          , theContextSwitcher       = return (EventHandlerContinue ())
+          , theContextSwitcher       = return (ActionOK ())
           }
     ((), env) <- flip runProviderIO env $ do
       installExposeEventHandler
@@ -706,18 +700,18 @@ gtkAttachHapplet showWin win happ init = void $ runProviderOnLock win $ do
     , reactTo = \ size -> do
         eventControl <- providerLiftGUI happ $ init size
         case eventControl of
-          EventHandlerContinue () -> do
+          ActionOK ()       -> do
             env <- get
             when showWin $ liftIO $ do
               Gtk.widgetShowAll (gtkWindow env)
               Gtk.widgetQueueDraw (gtkWindow env)
-          EventHandlerHalt        -> liftIO $ hPutStrLn stderr $
+          ActionHalt        -> liftIO $ hPutStrLn stderr $
             "'deleteEventHandler' was called during Happlet initialization.\n" ++
             "Happlet will not attach to window."
-          EventHandlerCancel      -> liftIO $ hPutStrLn stderr $
+          ActionCancel      -> liftIO $ hPutStrLn stderr $
             "'cancelNow' was called during Happlet initialization.\n"++
             "Happlet will not attach to window."
-          EventHandlerFail   msg  -> liftIO $ hPutStrLn stderr $
+          ActionFail   msg  -> liftIO $ hPutStrLn stderr $
             "Happlet failed to initialize: "++show msg
             -- TODO: also show a modal dialog box reporting the error.
     }
@@ -863,12 +857,6 @@ instance CanResize Gtk2Provider where
   windowResizeMode = fmapConfigStateMonad liftGUIProvider $
     configStateWithLens (cairoRenderState . canvasResizeMode)
 
-data AnimationThreadControl
-  = AnimationThreadControl
-    { animationThreadAlive :: !Bool
-    , animationInitTime    :: !UTCTime
-    }
-
 instance CanAnimate Gtk2Provider where
   animationIsRunning = liftGUIProvider $
     gets theAnimatorThread <&> \ case { Disconnected -> False; _ -> True; }
@@ -879,23 +867,12 @@ instance CanAnimate Gtk2Provider where
         eventDescription  = "stepFrameEvents"
       , eventLensReaction = animatorThread
       , eventPreInstall   = return ()
-      , eventInstall      = \ env next -> do
-          let rate = env & view animationFrameRate . currentConfig
-          t0    <- getCurrentTime
-          t0ref <- newIORef AnimationThreadControl
-            { animationThreadAlive = True
-            , animationInitTime    = t0
-            }
-          frame <- flip Glib.timeoutAdd (min 200 $ floor (1000.0 / rate)) $ do
-            (AnimationThreadControl
-              {animationThreadAlive=alive
-              ,animationInitTime=t0
-              }) <- readIORef t0ref
-            when alive $ diffUTCTime <$> getCurrentTime <*> pure t0 >>= next . realToFrac
-            animationThreadAlive <$> readIORef t0ref
-          return $ do
-            modifyIORef t0ref $ \ ctrl -> ctrl{ animationThreadAlive = False }
-            Glib.timeoutRemove frame
+      , eventInstall      = \ env next ->
+          let rate = env & view animationFrameRate . currentConfig in
+          Glib.timeoutRemove <$>
+          Glib.timeoutAdd
+          (getCurrentTime >>= next >> return True)
+          (min 200 $ floor (1000.0 / rate))
       , eventGUIReaction  = react
       }
     -- The 'react' function needs to be evaluated here at time 0, becuase 'timeoutAdd' does not call
@@ -903,11 +880,11 @@ instance CanAnimate Gtk2Provider where
     -- a noticable delay between the time the 'stepFrameEvents' function is evaluated and the first
     -- frame callback is evaluated.
     let disconnect = liftGUIProvider $ forceDisconnect animatorThread
-    guiCatch (react 0) $ \ case
-      EventHandlerContinue () -> return ()
-      EventHandlerFail   _msg -> disconnect
-      EventHandlerCancel      -> disconnect
-      EventHandlerHalt        -> disconnect
+    guiCatch (liftIO getCurrentTime >>= react) $ \ case
+      ActionOK ()      -> return ()
+      ActionFail  _msg -> disconnect
+      ActionCancel     -> disconnect
+      ActionHalt       -> disconnect
 
 instance CanKeyboard Gtk2Provider where
   keyboardEvents react = installEventHandler EventSetup
@@ -1006,87 +983,6 @@ instance CanMouse Gtk2Provider where
       }
 
 ----------------------------------------------------------------------------------------------------
-
----- | When installing a Glib event handler, the sequence of evaluation for locking resources,
----- obtaining parameters from the 'GtkState', evaluating monads using these resources, is a delicate
----- process that is very easy to get wrong. So I have created an abstraction for the sequence of
----- actions that occurs during event handler installation. Event handler installers set the fields
----- of this data structure and pass it to 'intallEventHandler'.
-----
----- The 'simpleSetup' constructor is also provided, which is used by event handlers that do not need
----- to install and remove the callbacks because they are always installed, for example the resize
----- window handler. The 'simpleSetup' takes only the debug parameters, the 'eventLensReaction', and the
----- 'eventGUIReaction', and it simply updates the 'eventLensReaction' to trigger the given
----- 'eventGUIReaction'.
---data EventSetup event model
---  = EventSetup
---    { eventDebugTag     :: DebugTag
---      -- ^ Which tags to set in the debug system.
---    , eventDescription  :: String
---      -- ^ A human-readble description of which event handler installer this is, to be reported in
---      -- debug logs.
---    , eventLensReaction :: Lens' Gtk2Provider (ConnectReact event)
---      -- ^ A lens that can get and set one of the 'ConnectReact' functions in the Gtk window state.
---    , eventPreInstall   :: GtkState ()
---      -- ^ An action to perform prior installing the Gtk event handler callback.
---    , eventInstall      :: Log IO -> DebugTag -> Gtk2Provider -> (event -> IO ()) -> IO (IO ())
---      -- ^ Install the Gtk event handler callback which triggers event reactions.
---    , eventGUIReaction  :: event -> GtkGUI model ()
---      -- ^ The GUI function provided by the end users (programmers) of this library that reacts to
---      -- the event with a state update.
---    }
-
----- | An 'EventSetup' that does nothing more than install a 'ConnectReact' function.
---simpleSetup
---  :: DebugTag
---  -> String
---  -> Lens' Gtk2Provider (ConnectReact event)
---  -> (event -> GtkGUI model ())
---  -> EventSetup event model
---simpleSetup sel what connectReact react = EventSetup
---  { eventDebugTag     = sel
---  , eventDescription  = what
---  , eventLensReaction = connectReact
---  , eventPreInstall   = return ()
---  , eventInstall      = \ _ _ _ _ -> return $ pure ()
---  , eventGUIReaction    = react
---  }
-
----- | This function enables an event handler, and takes a continuation which will be evaluated by
----- this function call to do the low-level work of install the event handler into the Gtk
----- window. This function also does the work of taking a 'Happlets.GUI.GUI' function to be evaluated
----- on each event, converting this function to a 'ConnectReact' function, and installing it into the
----- 'GtkWindow's internal state so that it can be actually evaluated every time the low-level event
----- handler is evaluated. The result is a function that can be used to instantiate any of the
----- "Happlets.GUI" module's event handler classes.
---installEventHandler :: Show event => EventSetup event model -> GtkGUI model ()
---installEventHandler setup = do
---  let sel        = eventDebugTag     setup
---  let what       = eventDescription  setup
---  let preinstall = eventPreInstall   setup
---  let install    = eventInstall      setup
---  let react      = eventGUIReaction  setup
---  logIO <- mkLogger what
---  happ  <- askHapplet
---  let dbgmsg = "installEventHandler "++what
---  liftGtkStateIntoGUI sel dbgmsg $ do
---    forceDisconnect logIO sel what (eventLensReaction setup)
---    liftIO $ logIO sel $ "-- preinstall "++what++" event handler"
---    preinstall
---    env <- get
---    disconnect <- liftIO $ do
---      logIO sel $ "-- install "++what++"event handler"
---      install logIO sel env $ \ event -> do
---        lockGtkWindow logIO sel (GtkUnlockedWin $ thisWindow env) $
---          evalConnectReact logIO sel what (eventLensReaction setup) event
---    liftIO $ logIO sel $ what ++ " -- now enabled"
---    (eventLensReaction setup) .= ConnectReact
---      { doReact = logSubGtk logIO sel ("liftGUIintoGtkState "++what) .
---          liftGUIintoGtkState happ . react >=> \ guiCont ->
---            logSubGtk logIO sel (unwords ["checkGUIContinue", what, show guiCont]) $
---              checkGUIContinue logIO sel what (eventLensReaction setup) guiCont
---      , doDisconnect = liftIO (logIO sel $ "disconnect "++what) >> disconnect
---      }
 
 handleMouse :: Pressed -> Gtk.EventM Gtk.EButton Mouse
 handleMouse upDown = do
@@ -1300,16 +1196,16 @@ instance HappletWindow Gtk2Provider CairoRender where
           onCanvas $ do
             cairoClipRect .= (rect2D & rect2DHead .~ winsize)
             cairoRender Cairo.restore
-        Just rect -> onCanvas $ do
-          cairoClipRect .= rect
+        Just irect -> onCanvas $ do
+          let rect = realToFrac <$> irect :: Rect2D Double
+          cairoClipRect .= irect
           cairoRender $ do
             Cairo.save
             let tail = rect ^. rect2DTail
             let head = rect ^. rect2DHead
             let (x, y) = tail ^. pointXY
             let (w, h) = (head - tail) ^. pointXY
-            let f (SampCoord x) = realToFrac x
-            Cairo.rectangle (f x) (f y) (f w) (f h)
+            Cairo.rectangle x y w h
             Cairo.clip
     }
 
@@ -1350,11 +1246,10 @@ instance HappletPixelBuffer Gtk2Provider CairoRender where
     csurf  <- case rendst ^. gtkCairoSurface of
       Nothing    -> newSurface
       Just csurf -> do
-        oldDims <- (,)
+        oldDims <- V2
           <$> Cairo.imageSurfaceGetWidth  csurf
           <*> Cairo.imageSurfaceGetHeight csurf
-        let f (SampCoord a) = fromIntegral a
-        if oldDims == (f w, f h) then return csurf else newSurface
+        if (sampCoord <$> oldDims) == size then return csurf else newSurface
     (a, rendst) <- liftIO $ Cairo.renderWith csurf $ runCairoRender size rendst redraw
     put rendst
     gtkCairoSurface .= Just csurf

@@ -1,18 +1,18 @@
 module Happlets.Provider.Cairo where
 
 import           Happlets
-import           Happlets.View.Color (black)
 import           Happlets.Provider.Gtk2.Debug
 
 import           Control.Arrow
 import           Control.Concurrent
-import           Control.Lens (modifying)
 
 import           Data.Array.MArray
 import           Data.Bits
 import qualified Data.Text           as Strict
 import qualified Data.Vector.Unboxed as UVec
 import           Data.Word
+
+import           Linear (V4(..))
 
 import qualified Graphics.Rendering.Cairo           as Cairo
 import qualified Graphics.Rendering.Cairo.Matrix    as Cairo
@@ -68,42 +68,13 @@ data CairoRenderMode
   = VectorMode
   | RasterMode !(V2 Double) !(V2 Double)
 
-data CairoGeometry n
-  = CairoGeometry
-    { theCairoShape            :: !(Draw2DPrimitive n)
-    , theCairoLineWidth        :: !(LineWidth n)
-    , theCairoBlitTransform    :: !(Transform2D n)
-    , theCairoPatternTransform :: !(Transform2D n)
-    }
-
-instance Map2DShape CairoGeometry where
-  map2DShape f geom = CairoGeometry
-    { theCairoShape            = map2DShape f $ theCairoShape geom
-    , theCairoLineWidth        = f $ theCairoLineWidth geom
-    , theCairoBlitTransform    = fmap (fmap f) $ theCairoBlitTransform geom
-    , theCairoPatternTransform = fmap (fmap f) $ theCairoPatternTransform geom
-    }
-
-cairoShape :: Lens' (CairoGeometry n) (Draw2DPrimitive n)
-cairoShape = lens theCairoShape $ \ a b -> a{ theCairoShape = b }
-
-cairoLineWidth :: Lens' (CairoGeometry n) (LineWidth n)
-cairoLineWidth = lens theCairoLineWidth $ \ a b -> a{ theCairoLineWidth = b }
-
-cairoBlitTransform :: Lens' (CairoGeometry n) (Transform2D n)
-cairoBlitTransform = lens theCairoBlitTransform $ \ a b -> a{ theCairoBlitTransform = b }
-
-cairoPatternTransform :: Lens' (CairoGeometry n) (Transform2D n)
-cairoPatternTransform = lens theCairoPatternTransform $ \ a b -> a{ theCairoPatternTransform = b }
-
 data CairoRenderState
   = CairoRenderState
     { theCairoKeepWinSize        :: !PixSize
     , theCanvasResizeMode        :: !CanvasResizeMode
-    , theCanvasFillColor         :: !PaintSource
-    , theCanvasStrokeColor       :: !PaintSource
+    , theCanvasFillColor         :: !(PaintSource SampCoord)
+    , theCanvasStrokeColor       :: !(PaintSource SampCoord)
     , theCanvasBlitOperator      :: !BlitOperator
-    , theCairoGeometry           :: !(CairoGeometry Double)
     , theCairoClipRect           :: !(Rect2D SampCoord)
     , theCairoRenderMode         :: !CairoRenderMode
     , theCairoScreenPrinterState :: !ScreenPrinterState
@@ -113,17 +84,14 @@ data CairoRenderState
 cairoKeepWinSize :: Lens' CairoRenderState PixSize
 cairoKeepWinSize = lens theCairoKeepWinSize $ \ a b -> a{ theCairoKeepWinSize = b }
 
-canvasFillColor :: Lens' CairoRenderState PaintSource
+canvasFillColor :: Lens' CairoRenderState (PaintSource SampCoord)
 canvasFillColor = lens theCanvasFillColor $ \ a b -> a{ theCanvasFillColor = b }
 
-canvasStrokeColor :: Lens' CairoRenderState PaintSource
+canvasStrokeColor :: Lens' CairoRenderState (PaintSource SampCoord)
 canvasStrokeColor = lens theCanvasStrokeColor $ \ a b -> a{ theCanvasStrokeColor = b }
 
 canvasBlitOperator :: Lens' CairoRenderState BlitOperator
 canvasBlitOperator = lens theCanvasBlitOperator $ \ a b -> a{ theCanvasBlitOperator = b }
-
-cairoGeometry :: Lens' CairoRenderState (CairoGeometry Double)
-cairoGeometry = lens theCairoGeometry $ \ a b -> a{ theCairoGeometry = b }
 
 cairoClipRect :: Lens' CairoRenderState (Rect2D SampCoord)
 cairoClipRect = lens theCairoClipRect $ \ a b -> a{ theCairoClipRect = b }
@@ -330,32 +298,14 @@ cairoGradStops pat = mapM_ $ \ stop -> do
   let (r,g,b,a) = unpackRGBA32Color $ stop ^. gradStopColor
   Cairo.patternAddColorStopRGBA pat (stop ^. gradStopPoint) r g b a
 
-m44toCairoMatrix :: RealFrac n => Transform2D n -> Cairo.Matrix
-m44toCairoMatrix m0 = let (V2 (V2 xx yx) (V2 xy yy)) = fmap realToFrac <$> (m0 ^. _m22) in
-  Cairo.Matrix xx yx xy yy 0 0
-
-cairoDrawWithSource :: Lens' CairoRenderState PaintSource -> Cairo.Render () -> CairoRender ()
-cairoDrawWithSource paint draw = let f = realToFrac in do
-  use paint >>= cairoRender . \ case
-    PaintSolidColor    color           -> cairoSetColor color
-    PaintGradient gtyp start end stops -> do
-      let gradStops pat = cairoGradStops pat $
-            GradientStop 0.0 start : gradStopsToList stops ++ [GradientStop 1.0 end]
-      case gtyp of
-        GradRadial (V2 x1 y1) (Magnitude r1) (V2 x2 y2) (Magnitude r2) ->
-          Cairo.withRadialPattern (f x1) (f y1) (f r1) (f x2) (f y2) (f r2) gradStops
-        GradLinear (V2 x1 y1) (V2 x2 y2) ->
-          Cairo.withLinearPattern (f x1) (f y1) (f x2) (f y2) gradStops
-  geom <- use cairoGeometry
-  use canvasBlitOperator >>= setConfig cairoBlitOperator
-  use cairoClipRect >>= setConfig cairoClipRegion
-  vectorMode
-  cairoRender $ do
-    Cairo.resetClip
-    Cairo.setLineWidth $ geom ^. cairoLineWidth
-    Cairo.setMatrix $ m44toCairoMatrix $ geom ^. cairoBlitTransform
-    cairoDrawShape $ geom ^. cairoShape
-    draw
+m44toCairoMatrix :: RealFrac n => Transform2D n any -> Cairo.Matrix
+m44toCairoMatrix trans =
+  let (V4 (V4 xx yx _ _) (V4 xy yy _ _) (V4 x0 y0 _ _) _) =
+        fmap realToFrac <$> theTransform2D trans
+  in  Cairo.Matrix
+      xx   xy
+      yx   yy
+      x0   y0
 
 -- | Move the position of the cairo graphics context "pen" object.
 cairoMoveTo :: RealFrac n => Point2D n -> Cairo.Render ()
@@ -486,17 +436,22 @@ instance Happlet2DGraphics CairoRender where
 --  strokeColor = canvasStrokeColor
 --  clipRegion = cairoClipRect
 
-cairoPaintSource :: PaintSource SampCoord -> CairoRender () -> CairoRender ()
+cairoPaintSource :: PaintSource SampCoord -> Cairo.Render () -> CairoRender ()
 cairoPaintSource d render = do
   setConfig cairoBlitOperator $ thePaintSourceBlit d
-  cairoEvalPaintFunction (thePaintSourceFunction d) render
+  cairoEvalPaintFunction (thePaintSourceFunction d) $ \ pat -> do
+    Cairo.setSource pat
+    render
 
-cairoEvalPaintFunction :: PaintSourceFunction SampCoord -> Cairo.Render () -> CairoRender ()
-cairoEvalPaintFunction source runPaint = case source of
+cairoEvalPaintFunction
+  :: PaintSourceFunction SampCoord
+  -> (Cairo.Pattern -> Cairo.Render ())
+  -> CairoRender ()
+cairoEvalPaintFunction source runPaint = cairoRender $ case source of
   SolidColorSource color -> do
-    cairoSetColor color
-    cairoRender runPaint
-  GradientSource (trans2D@(Transform2D{theDrawing2D=grad})) ->
+    let (r,g,b,a) = unpackRGBA32Color color
+    Cairo.withRGBAPattern r g b a runPaint
+  GradientSource ((Transform2D{theDrawing2D=grad})) ->
     let f = realToFrac :: Float -> Double in
     ( case thePaintGradType grad of
         GradLinear (V2 x0 y0) (V2 x1 y1) ->
@@ -504,31 +459,8 @@ cairoEvalPaintFunction source runPaint = case source of
         GradRadial (V2 x0 y0) (Magnitude r0) (V2 x1 y1) (Magnitude r1) ->
           Cairo.withRadialPattern (f x0) (f y0) (f r0) (f x1) (f y1) (f r1)
     ) $ runPaint
-  PixelBufferSource   () -> do -- TODO: this will change
-    cairoSetColor black
-    cairoRender runPaint
-
--- | Sets the Cairo 'Cairo.Pattern' gradient color stops.
-cairoPaintGradient :: Cairo.Pattern -> Transform2D SampCoord PaintGradient -> CairoRender ()
-cairoPaintGradient pat (Transform2D{theTransform2D=m44,theDrawing2D=grad}) = cairoRender $ do
-  let f = realToFrac :: Float -> Double
-  let (r1,g1,b1,a1) = unpackRGBA32Color end
-  Cairo.withRGBAPattern r1 g1 b1 a1 $ \ pat -> do
-    Cairo.patternSetMatrix pat (cairoMatrix44 m44)
-    let (r0,g0,b0,a0) = unpackRGBA32Color start
-    Cairo.patternAddColorStopRGBA pat 0.0 r0 g0 b0 a0
-    forM_ (gradStopsToList stops) $ \ stop -> do
-       let (r,g,b,a) = unpackRGBA32Color $ theGradStopColor stop
-       Cairo.patternAddColorStop pat (theGradStopPoint stop) r g b a
-    Cairo.patternAddColorStopRGBA pat 1.0 r1 g1 b1 a1
-
-cairoMatrix44 :: M44 SampCoord -> Cairo.Matrix
-cairoMatrix44 (V4 (V4 xx yx _ _) (V4 xy yy _ _) (V4 x0 y0 _ _) _) =
-  Cairo.Matrix
-  { Cairo.xx = xx, Cairo.xy = xy
-  , Cairo.yx = yx, Cairo.yy = yy
-  , Cairo.x0 = x0, Cairo.y0 = y0
-  }
+  PixelBufferSource   () -> -- TODO: this will change
+    Cairo.withRGBAPattern 0 0 0 0 runPaint
 
 cairoFillStroke :: Draw2DFillStroke SampCoord -> CairoRender ()
 cairoFillStroke = \ case
@@ -553,50 +485,51 @@ cairoDrawPrimitive = \ case
     cairo2DPath shape
     cairoFillStroke paint
   Draw2DCubic paint shape -> do
-    cairo2DCubeic shape
+    cairo2DCubic shape
     cairoFillStroke paint
 
 cairo2DLine :: Line2D SampCoord -> CairoRender ()
 cairo2DLine d = cairoRender $ do
   let f = (0.5 +) . realToFrac :: SampCoord -> Double
-  let (V2 x0 y0) = d ^. line2DTail
+  let (V2 x0 y0) = f <$> (d ^. line2DTail)
   Cairo.moveTo x0 y0
-  let (V2 x1 y1) = d ^. line2DHead
+  let (V2 x1 y1) = f <$> (d ^. line2DHead)
   Cairo.moveTo x1 y1
 
 cairo2DRect :: Rect2D SampCoord -> CairoRender ()
 cairo2DRect d = cairoRender $ do
-  let f = realToFrac :: SampCoord -> Double
-  let (V2 x y) = d ^. rect2DTail
-  let (V2 w h) = d ^. rect2DSize
-  Cairo.rectangle (f x) (f y) (f w) (f h)
+  let (V2 x y) = realToFrac <$> (d ^. rect2DTail)
+  let (V2 w h) = realToFrac <$> rect2DSize d
+  Cairo.rectangle x y w h
 
 cairo2DArc :: Arc2D SampCoord -> CairoRender ()
 cairo2DArc d = cairoRender $ do
-  let f = realToFrac :: SampCoord -> Double
-  let (V2 x y) = d ^. arc2DOrigin
-  let (Magnitude r) = d ^. arc2DRadius
-  let (StartAngle a) = d ^. arc2DStart
-  let (EndAngle b) = d ^. arc2DEnd
-  (if r < 0 then Cairo.arcNegative else Cairo.arc)
-    (f x) (f y) ((if r < 0 then negate else id) (f r)) (f start) (f end)
+  let (V2 x y) = realToFrac <$> (d ^. arc2DOrigin)
+  let (Magnitude r) = realToFrac <$> (d ^. arc2DRadius)
+  (if r < 0 then Cairo.arcNegative else Cairo.arc) x y
+    (if r < 0 then negate r else r)
+    (realToFrac $ d ^. arc2DStart)
+    (realToFrac $ d ^. arc2DEnd)
 
 cairo2DPath :: Path2D SampCoord -> CairoRender ()
 cairo2DPath d = cairoRender $ do
-  let f = realToFrac :: SampCoord -> Double
-  let (V2 x y, points) = d ^. path2DPoints
-  Cairo.moveTo (f x) (f y)
-  forM_ points $ \ (V2 x y) -> Cairo.lineTo x y
+  let (origin, points) = path2DPoints d
+  let (V2 x y) = realToFrac <$> origin
+  Cairo.moveTo x y
+  forM_ points $ \ pt -> do
+    let (V2 x y) = realToFrac <$> pt
+    Cairo.lineTo x y
 
 cairo2DCubic :: Cubic2D SampCoord -> CairoRender ()
 cairo2DCubic d = cairoRender $ do
-  let (V2 x y, segments) = d ^. cubic2DPoints
-  Cairo.moveTo (f x) (f y)
+  let (origin, segments) = cubic2DPoints d
+  let (V2 x y) = realToFrac <$> origin
+  Cairo.moveTo x y
   forM_ segments $ \ s -> do
-    let (V2 x1 y1) = s ^. cubic2DCtrlPt1
-    let (V2 x2 y2) = s ^. cubic2DCtlrPt2
-    let (V2 x3 y3) = s ^. cubic2DEndPoint
-    Cairo.curveTo (f x1) (f y1) (f x2) (f y2) (f x3) (f y3)
+    let (V2 x1 y1) = realToFrac <$> (s ^. cubic2DCtrlPt1)
+    let (V2 x2 y2) = realToFrac <$> (s ^. cubic2DCtrlPt2)
+    let (V2 x3 y3) = realToFrac <$> (s ^. cubic2DEndPoint)
+    Cairo.curveTo x1 y1 x2 y2 x3 y3
 
 -- | Calls the internal Cairo API function 'Cairo.clip' to update the clip region state.
 cairoClipRegion :: ConfigState CairoRender (Rect2D SampCoord)
