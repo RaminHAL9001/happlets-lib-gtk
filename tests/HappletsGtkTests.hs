@@ -6,6 +6,7 @@ import           Control.Concurrent
 
 import           Data.Maybe
 import qualified Data.Text as Strict
+import           Data.Time.Clock (UTCTime, getCurrentTime, diffUTCTime)
 
 import qualified Graphics.Rendering.Cairo as Cairo
 
@@ -29,8 +30,10 @@ main = happlet gtkHapplet $ do
 
   mvar        <- liftIO $ newMVar "Main"
   thisThread  <- liftIO myThreadId
+  t0          <- liftIO getCurrentTime
   pulsecircle <- newHapplet PulseCircle
-    { thePulseCircleRadius     = 20
+    { thePulseCircleStartTime  = t0
+    , thePulseCircleRadius     = 20
     , thePulseCirclePosition   = V2 (-1) (-1)
     , thePulseCircleWindowSize = V2  640  480
     , thePulseCircleColor      = blue
@@ -68,19 +71,20 @@ mouseBox :: Lens' RedGrid (Maybe TextBoundingBox)
 mouseBox = lens theMouseBox $ \ a b -> a{ theMouseBox = b }
 
 redGridDraw :: Double -> PixSize -> CairoRender ()
-redGridDraw scale winsize = do
-  let (V2 w h) = realToFrac <$> winsize
+redGridDraw scale winsize@(V2 w h) =
   if scale <= 1 then clearScreen red else do
-    let mkLine v2 top i = Draw2DLine $ line2D & (line2DTail .~ v2 i 0) & (line2DHead .~ v2 i top)
+    let mkLine color v2 top i =
+          Draw2DLine
+          (paintColor color)
+          (line2D & (line2DTail .~ v2 i 0) & (line2DHead .~ v2 i top))
     clearScreen (black & alphaChannel .~ 0.9)
-    strokeWeight .= (1.0 :: Double)
-    strokeColor  .= PaintSolidColor red
-    forM_ [0::Int .. floor (w / scale)] $ \ i -> do
-      shape .= mkLine V2 h (0.5 + scale * realToFrac i)
-      stroke
-    forM_ [0::Int .. floor (h / scale)] $ \ i -> do
-      shape .= mkLine (flip V2) w (0.5 + scale * realToFrac i)
-      stroke
+    draw2D Nothing $
+      ( (\ i -> mkLine red V2 h $ floor $ scale * realToFrac i) <$>
+        [0::Int .. floor (realToFrac w / scale)]
+      ) ++
+      ( (\ i -> mkLine red (flip V2) w $ floor $ scale * realToFrac i) <$>
+        [0::Int .. floor (realToFrac h / scale)]
+      )
     void $ screenPrinter $
       withFontStyle (do{ fontForeColor .= white; fontSize .= 16.0; }) $ do
         renderOffset .= V2 0 0
@@ -95,7 +99,7 @@ redGridGUI ctx _size = do
   changeEvents $ liftIO $ do
     putStrLn "change away from Red Grid"
     void $ swapMVar mvar "Red Grid"
-  resizeEvents CanvasResizeCopy $ \ _oldsize newsize -> cancelIfBusy >> draw newsize
+  resizeEvents CanvasResizeCopy $ \ _oldsize newsize -> draw newsize
   mouseEvents MouseAll $ \ (Mouse _ down _ button pt1@(V2 x1 y1)) -> do
     use lastMouse >>= \ case
       Nothing         -> return ()
@@ -136,7 +140,8 @@ redGridGUI ctx _size = do
 
 data PulseCircle
   = PulseCircle
-    { thePulseCircleRadius     :: !Double
+    { thePulseCircleStartTime  :: !UTCTime
+    , thePulseCircleRadius     :: !Double
     , thePulseCirclePosition   :: !(V2 Double)
     , thePulseCircleColor      :: !Color
     , thePulseCircleWindowSize :: !PixSize
@@ -144,6 +149,9 @@ data PulseCircle
     , thePulseCircleWorker     :: !ThreadId
     }
   deriving (Eq)
+
+pulseCircleStartTime :: Lens' PulseCircle UTCTime
+pulseCircleStartTime = lens thePulseCircleStartTime $ \ a b -> a{ thePulseCircleStartTime = b }
 
 pulseCircleRadius :: Lens' PulseCircle Double
 pulseCircleRadius = lens thePulseCircleRadius $ \ a b -> a{ thePulseCircleRadius = b }
@@ -175,7 +183,7 @@ circle (V2 x y) radius color = cairoRender $ do
   Cairo.setOperator op
 
 pulseCircleGUI :: TestSuite -> PixSize -> GtkGUI PulseCircle ()
-pulseCircleGUI ctx initSize@(V2 (SampCoord w) (SampCoord h)) = do
+pulseCircleGUI ctx initSize@(V2 w h) = do
   -- Initialize the model such that the circle is placed in the middle of the window.
   pulseCirclePosition %= \ old@(V2 oldW oldH) ->
     if oldW < 0 || oldH < 0 then V2 (realToFrac w / 2) (realToFrac h / 2) else old
@@ -184,7 +192,7 @@ pulseCircleGUI ctx initSize@(V2 (SampCoord w) (SampCoord h)) = do
   let loop runGUI = do
         putStrLn "Draw white line..."
         result <- runGUI $ do
-          (V2 (SampCoord w) (SampCoord h)) <- use pulseCircleWindowSize
+          (V2 w h) <- use pulseCircleWindowSize
           let (x, y) = (realToFrac $ div w 2, realToFrac $ div h 2)
           let r = min x y
           t <- use pulseCircleClockStep
@@ -195,7 +203,11 @@ pulseCircleGUI ctx initSize@(V2 (SampCoord w) (SampCoord h)) = do
             Cairo.lineTo (x + r * cos theta) (y - r * sin theta)
             cairoSetColor white
             Cairo.stroke
-        print result
+        putStrLn $ case result of
+          ActionOK   a   -> "OK: " ++ show a
+          ActionHalt     -> "HALT"
+          ActionCancel   -> "CANCEL"
+          ActionFail msg -> "FAIL: " ++ Strict.unpack msg
         threadDelay 1000000
         loop runGUI
 
@@ -265,7 +277,8 @@ pulseCircleGUI ctx initSize@(V2 (SampCoord w) (SampCoord h)) = do
   -- Install an animator thread which makes the radius of the circle as a function of time.
   stepFrameEvents $ \ t -> do
     old <- get
-    pulseCircleRadius .= 20 * sin (2*pi * realToFrac t) + 40
+    let dt = diffUTCTime t $ thePulseCircleStartTime old
+    pulseCircleRadius .= 20 * sin (2*pi * realToFrac dt) + 40
     new <- get
     onCanvas $ drawDot False old new
 
