@@ -1,6 +1,6 @@
 module Main where
 
-import           Happlets.Provider.Gtk2
+import           Happlets.Provider.Gtk2 hiding (trace)
 
 import           Control.Concurrent
 
@@ -9,6 +9,8 @@ import qualified Data.Text as Strict
 import           Data.Time.Clock (UTCTime, getCurrentTime, diffUTCTime)
 
 import qualified Graphics.Rendering.Cairo as Cairo
+
+import Debug.Trace
 
 ----------------------------------------------------------------------------------------------------
 
@@ -73,18 +75,21 @@ mouseBox = lens theMouseBox $ \ a b -> a{ theMouseBox = b }
 redGridDraw :: Double -> PixSize -> CairoRender ()
 redGridDraw scale winsize@(V2 w h) =
   if scale <= 1 then clearScreen red else do
-    let mkLine color v2 top i =
-          Draw2DLine
-          (paintColor color)
-          (line2D & (line2DTail .~ v2 i 0) & (line2DHead .~ v2 i top))
+    let mkLine v2 top i = line2D &
+          (line2DTail .~ v2 i 0) &
+          (line2DHead .~ v2 i top)
     clearScreen (black & alphaChannel .~ 0.9)
+    traceM $ "redGridDraw " ++ show scale ++ ' ' : show winsize ++ " -> draw2D"
     draw2D Nothing $
-      ( (\ i -> mkLine red V2 h $ floor $ scale * realToFrac i) <$>
-        [0::Int .. floor (realToFrac w / scale)]
-      ) ++
-      ( (\ i -> mkLine red (flip V2) w $ floor $ scale * realToFrac i) <$>
-        [0::Int .. floor (realToFrac h / scale)]
-      )
+      [ Draw2DLines
+        (paintColor red) $
+        ( (\ i -> mkLine V2 h $ floor $ scale * realToFrac i) <$>
+          [0::Int .. floor (realToFrac w / scale)]
+        ) ++
+        ( (\ i -> mkLine (flip V2) w $ floor $ scale * realToFrac i) <$>
+          [0::Int .. floor (realToFrac h / scale)]
+        )
+      ]
     void $ screenPrinter $
       withFontStyle (do{ fontForeColor .= white; fontSize .= 16.0; }) $ do
         renderOffset .= V2 0 0
@@ -95,7 +100,10 @@ redGridDraw scale winsize@(V2 w h) =
 redGridGUI :: TestSuite -> PixSize -> GtkGUI RedGrid ()
 redGridGUI ctx _size = do
   let mvar = testSuiteSharedState ctx
-  let draw size = use redGridScale >>= onCanvas . flip redGridDraw size
+  let draw size = use redGridScale >>=
+        onCanvas .
+        flip redGridDraw size .
+        trace "redGridGUI -> redGridDraw"
   changeEvents $ liftIO $ do
     putStrLn "change away from Red Grid"
     void $ swapMVar mvar "Red Grid"

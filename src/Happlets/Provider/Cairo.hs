@@ -1,6 +1,6 @@
 module Happlets.Provider.Cairo where
 
-import           Happlets
+import           Happlets hiding (trace)
 import           Happlets.Provider.Gtk2.Debug
 
 import           Control.Arrow
@@ -59,6 +59,9 @@ instance Semigroup a => Semigroup (CairoRender a) where
 instance Monoid a => Monoid (CairoRender a) where
   mappend (CairoRender a) (CairoRender b) = CairoRender $ mappend <$> a <*> b
   mempty = return mempty
+
+withCairoRender :: CairoRenderState -> CairoRender a -> Cairo.Render (a, CairoRenderState)
+withCairoRender st (CairoRender f) = runStateT f st
 
 -- | Mose Cairo commands work in 'VectorMode' where no special state is necessary. But the
 -- 'Happlets.Draw.setPoint' and 'Happlets.Draw.getPoint' commands operate in 'RasterMode', where the
@@ -424,6 +427,7 @@ instance Happlet2DGraphics CairoRender where
   clearScreen = unpackRGBA32Color >>> \ (r,g,b,a) -> cairoRender $ cairoClearCanvas r g b a
 
   draw2D clipBounds primitives = cairoPreserve $ do
+    traceM "draw2D"
     maybe (pure ()) (setConfig cairoClipRegion) clipBounds
     forM_ primitives cairoDrawPrimitive
 
@@ -436,57 +440,66 @@ instance Happlet2DGraphics CairoRender where
 --  strokeColor = canvasStrokeColor
 --  clipRegion = cairoClipRect
 
-cairoPaintSource :: PaintSource SampCoord -> Cairo.Render () -> CairoRender ()
-cairoPaintSource d render = do
-  setConfig cairoBlitOperator $ thePaintSourceBlit d
-  cairoEvalPaintFunction (thePaintSourceFunction d) $ \ pat -> do
-    Cairo.setSource pat
+cairoPaintSource :: PaintSource SampCoord -> CairoRender () -> CairoRender ()
+cairoPaintSource src render = do
+  setConfig cairoBlitOperator $ thePaintSourceBlit src
+  cairoEvalPaintFunction (thePaintSourceFunction src) $ \ pat -> do
+    traceM "Cairo.setSource"
+    cairoRender $ Cairo.setSource pat
     render
+
+cairoPaintSource' :: PaintSource SampCoord -> Cairo.Render () -> CairoRender ()
+cairoPaintSource' src = cairoPaintSource src . cairoRender
 
 cairoEvalPaintFunction
   :: PaintSourceFunction SampCoord
-  -> (Cairo.Pattern -> Cairo.Render ())
+  -> (Cairo.Pattern -> CairoRender ())
   -> CairoRender ()
-cairoEvalPaintFunction source runPaint = cairoRender $ case source of
-  SolidColorSource color -> do
-    let (r,g,b,a) = unpackRGBA32Color color
-    Cairo.withRGBAPattern r g b a runPaint
-  GradientSource ((Transform2D{theDrawing2D=grad})) ->
-    let f = realToFrac :: Float -> Double in
-    ( case thePaintGradType grad of
-        GradLinear (V2 x0 y0) (V2 x1 y1) ->
-          Cairo.withLinearPattern (f x0) (f y0) (f x1) (f y1)
-        GradRadial (V2 x0 y0) (Magnitude r0) (V2 x1 y1) (Magnitude r1) ->
-          Cairo.withRadialPattern (f x0) (f y0) (f r0) (f x1) (f y1) (f r1)
-    ) $ runPaint
-  PixelBufferSource   () -> -- TODO: this will change
-    Cairo.withRGBAPattern 0 0 0 0 runPaint
+cairoEvalPaintFunction source runPaint =
+  CairoRender $ StateT $ \ st ->
+  case source of
+    SolidColorSource color -> do
+      let (r,g,b,a) = unpackRGBA32Color color
+      traceM $ "Cairo.withRGBAPattern " ++ show (r,g,b,a)
+      Cairo.withRGBAPattern r g b a $ withCairoRender st . runPaint
+    GradientSource ((Transform2D{theDrawing2D=grad})) ->
+      let f = realToFrac :: Float -> Double in
+      ( case thePaintGradType grad of
+          GradLinear (V2 x0 y0) (V2 x1 y1) ->
+            Cairo.withLinearPattern (f x0) (f y0) (f x1) (f y1)
+          GradRadial (V2 x0 y0) (Magnitude r0) (V2 x1 y1) (Magnitude r1) ->
+            Cairo.withRadialPattern (f x0) (f y0) (f r0) (f x1) (f y1) (f r1)
+      ) $ withCairoRender st . runPaint
+    PixelBufferSource   () -> -- TODO: this will change
+      Cairo.withRGBAPattern 0 0 0 0 $ withCairoRender st . runPaint
 
 cairoFillStroke :: Draw2DFillStroke SampCoord -> CairoRender ()
 cairoFillStroke = \ case
-  FillOnly   a   -> cairoPaintSource a Cairo.fill
-  StrokeOnly b   -> cairoPaintSource b Cairo.stroke
-  FillStroke a b -> cairoPaintSource a Cairo.fillPreserve >> cairoPaintSource b Cairo.stroke
-  StrokeFill b a -> cairoPaintSource b Cairo.strokePreserve >> cairoPaintSource a Cairo.fill
+  FillOnly   a   -> cairoPaintSource' a Cairo.fill
+  StrokeOnly b   -> cairoPaintSource' b Cairo.stroke
+  FillStroke a b -> cairoPaintSource' a Cairo.fillPreserve >> cairoPaintSource' b Cairo.stroke
+  StrokeFill b a -> cairoPaintSource' b Cairo.strokePreserve >> cairoPaintSource' a Cairo.fill
 
 cairoDrawPrimitive :: Draw2DPrimitive SampCoord -> CairoRender ()
 cairoDrawPrimitive = \ case
-  Draw2DReset             -> return ()
-  Draw2DLine  paint shape -> do
-    cairo2DLine shape
-    cairoPaintSource paint Cairo.stroke
-  Draw2DRect  paint shape -> do
-    cairo2DRect shape
+  Draw2DReset               -> return ()
+  Draw2DLines  paint shapes -> cairoPaintSource paint $ do
+    forM_ shapes $ \ shape -> do
+      traceM $ "cairoDrawPrimitive Line2D (" ++
+        show (shape ^. line2DTail . pointXY, shape ^. line2DHead . pointXY) ++ ")"
+      cairo2DLine shape
+    traceM "Cairo.stroke"
+    cairoRender Cairo.stroke
+  Draw2DShapes paint shapes -> do
+    mapM_ cairoDraw2DShape shapes
     cairoFillStroke paint
-  Draw2DArc   paint shape -> do
-    cairo2DArc shape
-    cairoFillStroke paint
-  Draw2DPath  paint shape -> do
-    cairo2DPath shape
-    cairoFillStroke paint
-  Draw2DCubic paint shape -> do
-    cairo2DCubic shape
-    cairoFillStroke paint
+
+cairoDraw2DShape :: Draw2DShape SampCoord -> CairoRender ()
+cairoDraw2DShape = \ case
+  Draw2DRect  shape -> cairo2DRect  shape
+  Draw2DArc   shape -> cairo2DArc   shape
+  Draw2DPath  shape -> cairo2DPath  shape
+  Draw2DCubic shape -> cairo2DCubic shape
 
 cairo2DLine :: Line2D SampCoord -> CairoRender ()
 cairo2DLine d = cairoRender $ do
