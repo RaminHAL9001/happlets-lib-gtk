@@ -10,8 +10,6 @@ import           Data.Time.Clock (UTCTime, getCurrentTime, diffUTCTime)
 
 import qualified Graphics.Rendering.Cairo as Cairo
 
-import Debug.Trace
-
 ----------------------------------------------------------------------------------------------------
 
 -- This data structure contains the GUI functions which initialize each Happlet that can be attached
@@ -79,7 +77,6 @@ redGridDraw scale winsize@(V2 w h) =
           (line2DTail .~ v2 i 0) &
           (line2DHead .~ v2 i top)
     clearScreen (black & alphaChannel .~ 0.9)
-    traceM $ "redGridDraw " ++ show scale ++ ' ' : show winsize ++ " -> draw2D"
     draw2D Nothing $
       [ Draw2DLines
         (paintColor red) $
@@ -100,10 +97,7 @@ redGridDraw scale winsize@(V2 w h) =
 redGridGUI :: TestSuite -> PixSize -> GtkGUI RedGrid ()
 redGridGUI ctx _size = do
   let mvar = testSuiteSharedState ctx
-  let draw size = use redGridScale >>=
-        onCanvas .
-        flip redGridDraw size .
-        trace "redGridGUI -> redGridDraw"
+  let draw size = use redGridScale >>= onCanvas . flip redGridDraw size
   changeEvents $ liftIO $ do
     putStrLn "change away from Red Grid"
     void $ swapMVar mvar "Red Grid"

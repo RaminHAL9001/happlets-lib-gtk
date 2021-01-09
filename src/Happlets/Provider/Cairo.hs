@@ -60,62 +60,13 @@ instance Monoid a => Monoid (CairoRender a) where
   mappend (CairoRender a) (CairoRender b) = CairoRender $ mappend <$> a <*> b
   mempty = return mempty
 
-withCairoRender :: CairoRenderState -> CairoRender a -> Cairo.Render (a, CairoRenderState)
-withCairoRender st (CairoRender f) = runStateT f st
-
--- | Mose Cairo commands work in 'VectorMode' where no special state is necessary. But the
--- 'Happlets.Draw.setPoint' and 'Happlets.Draw.getPoint' commands operate in 'RasterMode', where the
--- vector operations need to be flushed before beginning, and where the updated pixels need to be
--- marked before returning to 'VectorMode'.
-data CairoRenderMode
-  = VectorMode
-  | RasterMode !(V2 Double) !(V2 Double)
-
-data CairoRenderState
-  = CairoRenderState
-    { theCairoKeepWinSize        :: !PixSize
-    , theCanvasResizeMode        :: !CanvasResizeMode
-    , theCanvasFillColor         :: !(PaintSource SampCoord)
-    , theCanvasStrokeColor       :: !(PaintSource SampCoord)
-    , theCanvasBlitOperator      :: !BlitOperator
-    , theCairoClipRect           :: !(Rect2D SampCoord)
-    , theCairoRenderMode         :: !CairoRenderMode
-    , theCairoScreenPrinterState :: !ScreenPrinterState
-    , theGtkCairoSurface         :: !(Maybe Cairo.Surface)
-    }
-
-cairoKeepWinSize :: Lens' CairoRenderState PixSize
-cairoKeepWinSize = lens theCairoKeepWinSize $ \ a b -> a{ theCairoKeepWinSize = b }
-
-canvasFillColor :: Lens' CairoRenderState (PaintSource SampCoord)
-canvasFillColor = lens theCanvasFillColor $ \ a b -> a{ theCanvasFillColor = b }
-
-canvasStrokeColor :: Lens' CairoRenderState (PaintSource SampCoord)
-canvasStrokeColor = lens theCanvasStrokeColor $ \ a b -> a{ theCanvasStrokeColor = b }
-
-canvasBlitOperator :: Lens' CairoRenderState BlitOperator
-canvasBlitOperator = lens theCanvasBlitOperator $ \ a b -> a{ theCanvasBlitOperator = b }
-
-cairoClipRect :: Lens' CairoRenderState (Rect2D SampCoord)
-cairoClipRect = lens theCairoClipRect $ \ a b -> a{ theCairoClipRect = b }
-
-cairoRenderMode :: Lens' CairoRenderState CairoRenderMode
-cairoRenderMode = lens theCairoRenderMode $ \ a b -> a{ theCairoRenderMode = b }
-
-gtkCairoSurface :: Lens' CairoRenderState (Maybe Cairo.Surface)
-gtkCairoSurface = lens theGtkCairoSurface $ \ a b -> a{ theGtkCairoSurface = b }
-
-canvasResizeMode :: Lens' CairoRenderState CanvasResizeMode
-canvasResizeMode = lens theCanvasResizeMode $ \ a b -> a{ theCanvasResizeMode = b }
-
-cairoScreenPrinterState :: Lens' CairoRenderState ScreenPrinterState
-cairoScreenPrinterState = lens theCairoScreenPrinterState $ \ a b ->
-  a{ theCairoScreenPrinterState = b }
-
 -- | Lift a @"Graphics.Rendering.Cairo".'Cairo.Render'@ function type into the 'CairoRender'
 -- function type.
 cairoRender :: Cairo.Render a -> CairoRender a
 cairoRender = CairoRender . lift
+
+withCairoRender :: CairoRenderState -> CairoRender a -> Cairo.Render (a, CairoRenderState)
+withCairoRender st (CairoRender f) = runStateT f st
 
 -- | Extract a @"Graphics.Rendering.Cairo".'Cairo.Render'@ from a 'CairoRender' function type.
 --
@@ -134,6 +85,45 @@ runCairoRender winsize rendst (CairoRender render) =
     style <- use $ cairoScreenPrinterState . fontStyle
     lift $ cairoSetFontStyle True style style
     render
+
+----------------------------------------------------------------------------------------------------
+
+data CairoRenderState
+  = CairoRenderState
+    { theCairoKeepWinSize        :: !PixSize
+    , theCairoClipRect           :: !(Rect2D SampCoord)
+    , theCanvasResizeMode        :: !CanvasResizeMode
+    , theCairoRenderMode         :: !CairoRenderMode
+    , theCairoScreenPrinterState :: !ScreenPrinterState
+    , theGtkCairoSurface         :: !(Maybe Cairo.Surface)
+    }
+
+-- | Mose Cairo commands work in 'VectorMode' where no special state is necessary. But the
+-- 'Happlets.Draw.setPoint' and 'Happlets.Draw.getPoint' commands operate in 'RasterMode', where the
+-- vector operations need to be flushed before beginning, and where the updated pixels need to be
+-- marked before returning to 'VectorMode'.
+data CairoRenderMode
+  = VectorMode
+  | RasterMode !(V2 Double) !(V2 Double)
+
+cairoKeepWinSize :: Lens' CairoRenderState PixSize
+cairoKeepWinSize = lens theCairoKeepWinSize $ \ a b -> a{ theCairoKeepWinSize = b }
+
+cairoClipRect :: Lens' CairoRenderState (Rect2D SampCoord)
+cairoClipRect = lens theCairoClipRect $ \ a b -> a{ theCairoClipRect = b }
+
+canvasResizeMode :: Lens' CairoRenderState CanvasResizeMode
+canvasResizeMode = lens theCanvasResizeMode $ \ a b -> a{ theCanvasResizeMode = b }
+
+cairoRenderMode :: Lens' CairoRenderState CairoRenderMode
+cairoRenderMode = lens theCairoRenderMode $ \ a b -> a{ theCairoRenderMode = b }
+
+cairoScreenPrinterState :: Lens' CairoRenderState ScreenPrinterState
+cairoScreenPrinterState = lens theCairoScreenPrinterState $ \ a b ->
+  a{ theCairoScreenPrinterState = b }
+
+gtkCairoSurface :: Lens' CairoRenderState (Maybe Cairo.Surface)
+gtkCairoSurface = lens theGtkCairoSurface $ \ a b -> a{ theGtkCairoSurface = b }
 
 -- | Switch to vector mode (only if it isn't already) which marks the surface as "dirty" in the
 -- smallest possible rectangle containing all points. This function is called before every vector
@@ -157,6 +147,8 @@ rasterMode x y = CairoRender $ use cairoRenderMode >>= \ case
   VectorMode                           -> do
     lift cairoFlush
     cairoRenderMode .= RasterMode (V2 x y) (V2 x y)
+
+----------------------------------------------------------------------------------------------------
 
 -- | Set a 'Happlets.Draw.Text.FontStyle' in the current 'Cairo.Render' context.
 cairoSetFontStyle :: Bool -> FontStyle -> FontStyle -> Cairo.Render FontStyle
@@ -294,7 +286,13 @@ cairoSetColor = unpackRGBA32Color >>> \ (r,g,b,a) -> Cairo.setSourceRGBA r g b a
 -- | Push the graphics context by calling 'Cairo.save' before evaluating a given 'Cario.Render'
 -- function. When evaluation completes, pop the graphics context by calling 'Cairo.restore'.
 cairoPreserve :: CairoRender a -> CairoRender a
-cairoPreserve f = cairoRender Cairo.save >> f <* cairoRender Cairo.restore
+cairoPreserve render = do
+  st <- CairoRender get
+  cairoRender Cairo.save
+  a <- render
+  CairoRender $ put st
+  cairoRender Cairo.restore
+  return a
 
 cairoGradStops :: Cairo.Pattern -> [GradientStop] -> Cairo.Render ()
 cairoGradStops pat = mapM_ $ \ stop -> do
@@ -427,9 +425,8 @@ instance Happlet2DGraphics CairoRender where
   clearScreen = unpackRGBA32Color >>> \ (r,g,b,a) -> cairoRender $ cairoClearCanvas r g b a
 
   draw2D clipBounds primitives = cairoPreserve $ do
-    traceM "draw2D"
     maybe (pure ()) (setConfig cairoClipRegion) clipBounds
-    forM_ primitives cairoDrawPrimitive
+    cairoRender $ mapM_ cairoDrawPrimitive primitives
 
   --fill = cairoDrawWithSource canvasFillColor Cairo.fill
   --stroke = cairoDrawWithSource canvasStrokeColor Cairo.stroke
@@ -440,83 +437,77 @@ instance Happlet2DGraphics CairoRender where
 --  strokeColor = canvasStrokeColor
 --  clipRegion = cairoClipRect
 
-cairoPaintSource :: PaintSource SampCoord -> CairoRender () -> CairoRender ()
-cairoPaintSource src render = do
-  setConfig cairoBlitOperator $ thePaintSourceBlit src
-  cairoEvalPaintFunction (thePaintSourceFunction src) $ \ pat -> do
-    traceM "Cairo.setSource"
-    cairoRender $ Cairo.setSource pat
-    render
+cairoDrawPrimitive :: Draw2DPrimitive SampCoord -> Cairo.Render ()
+cairoDrawPrimitive = \ case
+  Draw2DReset               -> return ()
+  Draw2DLines  paint shapes ->
+    cairoPaintSource paint $
+    mapM_ cairo2DLine shapes >>
+    Cairo.stroke
+  Draw2DShapes paint shapes ->
+    cairoFillStroke paint $
+    mapM_ cairoDraw2DShape shapes
 
-cairoPaintSource' :: PaintSource SampCoord -> Cairo.Render () -> CairoRender ()
-cairoPaintSource' src = cairoPaintSource src . cairoRender
+cairoPaintSource :: PaintSource SampCoord -> Cairo.Render () -> Cairo.Render ()
+cairoPaintSource src render =
+  cairoEvalPaintFunction (thePaintSourceFunction src) $
+  Cairo.setSource >=> const render
+
+--cairoPaintSource' :: PaintSource SampCoord -> Cairo.Render () -> CairoRender ()
+--cairoPaintSource' src = cairoPaintSource src . cairoRender
 
 cairoEvalPaintFunction
   :: PaintSourceFunction SampCoord
-  -> (Cairo.Pattern -> CairoRender ())
-  -> CairoRender ()
-cairoEvalPaintFunction source runPaint =
-  CairoRender $ StateT $ \ st ->
-  case source of
-    SolidColorSource color -> do
-      let (r,g,b,a) = unpackRGBA32Color color
-      traceM $ "Cairo.withRGBAPattern " ++ show (r,g,b,a)
-      Cairo.withRGBAPattern r g b a $ withCairoRender st . runPaint
-    GradientSource ((Transform2D{theDrawing2D=grad})) ->
-      let f = realToFrac :: Float -> Double in
-      ( case thePaintGradType grad of
-          GradLinear (V2 x0 y0) (V2 x1 y1) ->
-            Cairo.withLinearPattern (f x0) (f y0) (f x1) (f y1)
-          GradRadial (V2 x0 y0) (Magnitude r0) (V2 x1 y1) (Magnitude r1) ->
-            Cairo.withRadialPattern (f x0) (f y0) (f r0) (f x1) (f y1) (f r1)
-      ) $ withCairoRender st . runPaint
-    PixelBufferSource   () -> -- TODO: this will change
-      Cairo.withRGBAPattern 0 0 0 0 $ withCairoRender st . runPaint
+  -> (Cairo.Pattern -> Cairo.Render ())
+  -> Cairo.Render ()
+cairoEvalPaintFunction = \ case
+  SolidColorSource color ->
+    let (r,g,b,a) = unpackRGBA32Color color in
+    Cairo.withRGBAPattern r g b a
+  GradientSource ((Transform2D{theDrawing2D=grad})) ->
+    let f = realToFrac :: Float -> Double in
+    case thePaintGradType grad of
+      GradLinear (V2 x0 y0) (V2 x1 y1) ->
+        Cairo.withLinearPattern (f x0) (f y0) (f x1) (f y1)
+      GradRadial (V2 x0 y0) (Magnitude r0) (V2 x1 y1) (Magnitude r1) ->
+        Cairo.withRadialPattern (f x0) (f y0) (f r0) (f x1) (f y1) (f r1)
+  PixelBufferSource   () -> -- TODO: this will change
+    Cairo.withRGBAPattern 0 0 0 0
 
-cairoFillStroke :: Draw2DFillStroke SampCoord -> CairoRender ()
-cairoFillStroke = \ case
-  FillOnly   a   -> cairoPaintSource' a Cairo.fill
-  StrokeOnly b   -> cairoPaintSource' b Cairo.stroke
-  FillStroke a b -> cairoPaintSource' a Cairo.fillPreserve >> cairoPaintSource' b Cairo.stroke
-  StrokeFill b a -> cairoPaintSource' b Cairo.strokePreserve >> cairoPaintSource' a Cairo.fill
+cairoFillStroke :: Draw2DFillStroke SampCoord -> Cairo.Render () -> Cairo.Render ()
+cairoFillStroke paint draw = case paint of
+  FillOnly   a   -> cairoPaintSource a $ draw >> Cairo.fill
+  StrokeOnly b   -> cairoPaintSource b $ draw >> Cairo.stroke
+  FillStroke a b -> do
+    cairoPaintSource a $ draw >> Cairo.fillPreserve
+    cairoPaintSource b $ draw >> Cairo.stroke
+  StrokeFill b a -> do
+    cairoPaintSource b $ draw >> Cairo.strokePreserve
+    cairoPaintSource a $ draw >> Cairo.fill
 
-cairoDrawPrimitive :: Draw2DPrimitive SampCoord -> CairoRender ()
-cairoDrawPrimitive = \ case
-  Draw2DReset               -> return ()
-  Draw2DLines  paint shapes -> cairoPaintSource paint $ do
-    forM_ shapes $ \ shape -> do
-      traceM $ "cairoDrawPrimitive Line2D (" ++
-        show (shape ^. line2DTail . pointXY, shape ^. line2DHead . pointXY) ++ ")"
-      cairo2DLine shape
-    traceM "Cairo.stroke"
-    cairoRender Cairo.stroke
-  Draw2DShapes paint shapes -> do
-    mapM_ cairoDraw2DShape shapes
-    cairoFillStroke paint
-
-cairoDraw2DShape :: Draw2DShape SampCoord -> CairoRender ()
+cairoDraw2DShape :: Draw2DShape SampCoord -> Cairo.Render ()
 cairoDraw2DShape = \ case
   Draw2DRect  shape -> cairo2DRect  shape
   Draw2DArc   shape -> cairo2DArc   shape
   Draw2DPath  shape -> cairo2DPath  shape
   Draw2DCubic shape -> cairo2DCubic shape
 
-cairo2DLine :: Line2D SampCoord -> CairoRender ()
-cairo2DLine d = cairoRender $ do
+cairo2DLine :: Line2D SampCoord -> Cairo.Render ()
+cairo2DLine d = do
   let f = (0.5 +) . realToFrac :: SampCoord -> Double
   let (V2 x0 y0) = f <$> (d ^. line2DTail)
   Cairo.moveTo x0 y0
   let (V2 x1 y1) = f <$> (d ^. line2DHead)
-  Cairo.moveTo x1 y1
+  Cairo.lineTo x1 y1
 
-cairo2DRect :: Rect2D SampCoord -> CairoRender ()
-cairo2DRect d = cairoRender $ do
+cairo2DRect :: Rect2D SampCoord -> Cairo.Render ()
+cairo2DRect d = do
   let (V2 x y) = realToFrac <$> (d ^. rect2DTail)
   let (V2 w h) = realToFrac <$> rect2DSize d
   Cairo.rectangle x y w h
 
-cairo2DArc :: Arc2D SampCoord -> CairoRender ()
-cairo2DArc d = cairoRender $ do
+cairo2DArc :: Arc2D SampCoord -> Cairo.Render ()
+cairo2DArc d = do
   let (V2 x y) = realToFrac <$> (d ^. arc2DOrigin)
   let (Magnitude r) = realToFrac <$> (d ^. arc2DRadius)
   (if r < 0 then Cairo.arcNegative else Cairo.arc) x y
@@ -524,8 +515,8 @@ cairo2DArc d = cairoRender $ do
     (realToFrac $ d ^. arc2DStart)
     (realToFrac $ d ^. arc2DEnd)
 
-cairo2DPath :: Path2D SampCoord -> CairoRender ()
-cairo2DPath d = cairoRender $ do
+cairo2DPath :: Path2D SampCoord -> Cairo.Render ()
+cairo2DPath d = do
   let (origin, points) = path2DPoints d
   let (V2 x y) = realToFrac <$> origin
   Cairo.moveTo x y
@@ -533,8 +524,8 @@ cairo2DPath d = cairoRender $ do
     let (V2 x y) = realToFrac <$> pt
     Cairo.lineTo x y
 
-cairo2DCubic :: Cubic2D SampCoord -> CairoRender ()
-cairo2DCubic d = cairoRender $ do
+cairo2DCubic :: Cubic2D SampCoord -> Cairo.Render ()
+cairo2DCubic d = do
   let (origin, segments) = cubic2DPoints d
   let (V2 x y) = realToFrac <$> origin
   Cairo.moveTo x y
@@ -553,23 +544,23 @@ cairoClipRegion = ConfigState
   , getConfig = use cairoClipRect
   }
 
--- | Calls the internal Cairo API function 'Cairo.setOperator' to update the blit operator state.
-cairoBlitOperator :: ConfigState CairoRender BlitOperator
-cairoBlitOperator = ConfigState
-  { setConfig = cairoRender . Cairo.setOperator . \ case
-      BlitSource   -> Cairo.OperatorSource
-      BlitOver     -> Cairo.OperatorOver
-      BlitXOR      -> Cairo.OperatorXor
-      BlitAdd      -> Cairo.OperatorAdd
-      BlitSaturate -> Cairo.OperatorSaturate
-  , getConfig = cairoRender $ Cairo.getOperator >>= \ case
-      Cairo.OperatorSource   -> return BlitSource
-      Cairo.OperatorOver     -> return BlitOver
-      Cairo.OperatorXor      -> return BlitXOR
-      Cairo.OperatorAdd      -> return BlitAdd
-      Cairo.OperatorSaturate -> return BlitSaturate
-      op -> fail $ "Using a Cairo blit operator not known to Happlets: "++show op
-  }
+---- | Calls the internal Cairo API function 'Cairo.setOperator' to update the blit operator state.
+--cairoBlitOperator :: ConfigState CairoRender BlitOperator
+--cairoBlitOperator = ConfigState
+--  { setConfig = cairoRender . Cairo.setOperator . \ case
+--      BlitSource   -> Cairo.OperatorSource
+--      BlitOver     -> Cairo.OperatorOver
+--      BlitXOR      -> Cairo.OperatorXor
+--      BlitAdd      -> Cairo.OperatorAdd
+--      BlitSaturate -> Cairo.OperatorSaturate
+--  , getConfig = cairoRender $ Cairo.getOperator >>= \ case
+--      Cairo.OperatorSource   -> return BlitSource
+--      Cairo.OperatorOver     -> return BlitOver
+--      Cairo.OperatorXor      -> return BlitXOR
+--      Cairo.OperatorAdd      -> return BlitAdd
+--      Cairo.OperatorSaturate -> return BlitSaturate
+--      op -> fail $ "Using a Cairo blit operator not known to Happlets: "++show op
+--  }
 
 ----------------------------------------------------------------------------------------------------
 
