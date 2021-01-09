@@ -440,11 +440,12 @@ instance Happlet2DGraphics CairoRender where
 cairoDrawPrimitive :: Draw2DPrimitive SampCoord -> Cairo.Render ()
 cairoDrawPrimitive = \ case
   Draw2DReset               -> return ()
-  Draw2DLines  paint shapes ->
+  Draw2DLines w paint shapes ->
     cairoPaintSource paint $
     mapM_ cairo2DLine shapes >>
+    Cairo.setLineWidth (realToFrac w) >>
     Cairo.stroke
-  Draw2DShapes paint shapes ->
+  Draw2DShapes  paint shapes ->
     cairoFillStroke paint $
     mapM_ cairoDraw2DShape shapes
 
@@ -476,14 +477,31 @@ cairoEvalPaintFunction = \ case
 
 cairoFillStroke :: Draw2DFillStroke SampCoord -> Cairo.Render () -> Cairo.Render ()
 cairoFillStroke paint draw = case paint of
-  FillOnly   a   -> cairoPaintSource a $ draw >> Cairo.fill
-  StrokeOnly b   -> cairoPaintSource b $ draw >> Cairo.stroke
-  FillStroke a b -> do
-    cairoPaintSource a $ draw >> Cairo.fillPreserve
-    cairoPaintSource b $ draw >> Cairo.stroke
-  StrokeFill b a -> do
-    cairoPaintSource b $ draw >> Cairo.strokePreserve
-    cairoPaintSource a $ draw >> Cairo.fill
+  FillOnly     a   ->
+    cairoPaintSource a $ do
+      draw
+      Cairo.fill
+  StrokeOnly w b   ->
+    cairoPaintSource b $ do
+      draw
+      Cairo.setLineWidth (realToFrac w)
+      Cairo.stroke
+  FillStroke w a b -> do
+    cairoPaintSource a $ do
+      draw
+      Cairo.fillPreserve
+    cairoPaintSource b $ do
+      draw
+      Cairo.setLineWidth (realToFrac w)
+      Cairo.stroke
+  StrokeFill w b a -> do
+    cairoPaintSource b $ do
+      draw
+      Cairo.setLineWidth (realToFrac w)
+      Cairo.strokePreserve
+    cairoPaintSource a $ do
+      draw
+      Cairo.fill
 
 cairoDraw2DShape :: Draw2DShape SampCoord -> Cairo.Render ()
 cairoDraw2DShape = \ case

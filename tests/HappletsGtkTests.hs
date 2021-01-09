@@ -78,7 +78,7 @@ redGridDraw scale winsize@(V2 w h) =
           (line2DHead .~ v2 i top)
     clearScreen (black & alphaChannel .~ 0.9)
     draw2D Nothing $
-      [ Draw2DLines
+      [ Draw2DLines 1
         (paintColor red) $
         ( (\ i -> mkLine V2 h $ floor $ scale * realToFrac i) <$>
           [0::Int .. floor (realToFrac w / scale)]
