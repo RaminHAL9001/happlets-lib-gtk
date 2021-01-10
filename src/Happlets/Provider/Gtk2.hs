@@ -105,21 +105,6 @@ logSubGtk logIO sel msg f = get >>=
 
 ----------------------------------------------------------------------------------------------------
 
----- | This data type acts as a handle to a Gtk+ environment, which contains pointers to the window
----- and graphpics contexts which you can manipulate by inserting or removing your own Happlets to be
----- displayed within it.
---type GtkWindow = ProviderStateLock Gtk2Provider
-
---data GtkWindow
---  = GtkUnlockedWin !(MVar Gtk2Provider)
---    -- ^ This is the constructor used by public-facing APIs. The 'Happlets.Initialize.newWindow'
---    -- 'Happlets.Initialize.deleteWindow', and 'Happlets.Initialize.attachWindow' functions all
---    -- return or pass this constructor around.
---  | GtkLockedWin   !(Gtk2Provider)
---    -- ^ This is the constructor use internally, particularly when evaluating the 'Happlets.GUI.GUI'
---    -- monad. When evaluation completes, it is stored back into the MVar for 'GtkUnlockedWin' and the
---    -- 'GtkUnlockedWin' is returned instead.
-
 -- | Contains parameters that can exist /after/ the 'Gtk.Window' has been allocated. These
 -- parameters are stored in an 'MVar' which is initialized in an empty state until the Gtk+ window
 -- is actually made visible (when it recieves the first "configure" event). The reason for this is
@@ -201,36 +186,6 @@ instance MonadProvider Gtk2Provider GtkState where
     forceDisconnect detatchHandler
     forceDisconnect resizeReaction
 
---data ConnectReact event
---  = Disconnected
---  | ConnectReact{ doDisconnect :: IO (), doReact :: event -> GtkState () }
-
---evalConnectReact
---  :: Log IO
---  -> DebugTag
---  -> String
---  -> Lens' Gtk2Provider (ConnectReact event)
---  -> event
---  -> GtkState ()
---evalConnectReact logIO sel what connectReact event = use connectReact >>= \ case
---  Disconnected -> liftIO $
---    logIO (_infra<>sel) $ "evalConnectReact "++what++" -- is not connected"
---  ConnectReact{doReact=f} ->
---    logSubGtk logIO (_infra<>sel) ("evalConnectReact "++what) $ f event
-
---forceDisconnect
---  :: Log IO
---  -> DebugTag
---  -> String
---  -> Lens' Gtk2Provider (ConnectReact event)
---  -> GtkState ()
---forceDisconnect logIO sel what connectReact = use connectReact >>= \ case
---  ConnectReact{doDisconnect=discon} -> do
---    liftIO $ logSubIO logIO (_infra<>sel) ("forceDisconnect "++what) discon
---    connectReact .= Disconnected
---  Disconnected -> liftIO $
---    logIO (_infra<>sel) $ "forceDisconnect "++what++" -- already disconnected"
-
 gtkEventBox :: Lens' Gtk2Provider Gtk.EventBox
 gtkEventBox = lens theGtkEventBox $ \ a b -> a{ theGtkEventBox = b }
 
@@ -305,90 +260,6 @@ instance MonadState Gtk2Provider GtkState where
 instance MonadIO GtkState where
   liftIO = GtkState . liftIO
 
----- | This function acquires a lock on the 'GtkState' and begins evaluating the 'GtkState'
----- function. This function should be evaluated at the top level of the procedure that is evaluated
----- by an event handler.
---lockGtkWindow :: Log IO -> DebugTag -> GtkWindow -> GtkState a -> IO a
---lockGtkWindow logIO sel win f = case win of
---  GtkUnlockedWin mvar -> logModMVar logIO (_locks<>sel) "GtkUnlockedWin" mvar $
---    liftM (\ (a, b) -> (b, a)) . runGtkState f
---  GtkLockedWin{}      -> fail
---    "lockGtkWindow: evaluated on an already locked 'GtkLockedWin' window."
-
----- | This function evaluates 'Happlets.GUI.GUI' functions within event handlers. It evaluates to a
----- 'GtkState' function, which means you are required to have first evaluated 'lockGtkWindow'. This
----- function will then lock the 'Happlets.GUI.Happlet' and then evaluate the 'Happlets.GUI.GUI'
----- function. If the 'Happlets.GUI.GUI' function evaluates to 'Happlets.GUI.disable' or
----- 'Happlets.GUI.failGUI', then this function returns 'Prelude.False'. Otherwise, 'Prelude.True' is
----- returned.
---liftGUIintoGtkState :: Happlet model -> GtkGUI model a -> GtkState (Consequence a)
---liftGUIintoGtkState happlet f = do
---  logIO <- mkLogger "liftGUIintoGtkState"
---  -- (1) Always set 'contextSwitcher' to a no-op, it may be set to something else by @f@.
---  Happlets.Provider.Gtk2.contextSwitcher .= return (EventHandlerContinue ())
---  winst <- get
---  (result, winst) <- liftIO $
---    logSubIO logIO _locks "Lock Happlet, evaluate GUI function." $ 
---      fmap fst $ onHapplet happlet $ \ model -> do
---        (guiContin, guist) <- logSubIO logIO _infra "call runGUI" $ runGUI f GUIState
---          { theGUIHapplet  = happlet
---          , theGUIProvider = GtkLockedWin winst
---          , theGUIModel    = model
---          , theGUIWorkers  = theGovernment winst
---          }
---        case theGUIProvider guist of
---          GtkLockedWin winst -> return ((guiContin, winst), theGUIModel guist)
---          GtkUnlockedWin{}   -> error
---            "'runGUI' successfully completed, but returned state containing a locked window."
---  --
---  put winst -- Save the GtkState state produced by evaluation of the GtkGUI function.
---  --
---  -- (2) Check if the result is 'HappletEventCancel', if it is, there is a chance that a context
---  -- switch occurred. The context switcher is always evaluated on a cancel signal. If the context
---  -- switcher was not changed by @f@ between (1) and (2), the 'contextSwitcher' field has therefore
---  -- not been changed from the (return ()) value (a no-op) set at (1) and so no context switch
---  -- occurs.
---  case result of
---    EventHandlerCancel -> winst ^. Happlets.Provider.Gtk2.contextSwitcher >>= \ case
---      EventHandlerFail msg -> do
---        -- TODO: here, display error dialog box and halt program.
---        fail $ Strict.unpack msg
---      _                    -> return ()
---    _                  -> return ()
---  return result
-
----- | This function is intended to be passed as a parameter to 'liftGUIintoGtkState' by event handling
----- functions which check if the 'Happlets.GUI.GUI' function evaluated to 'Happlets.GUI.disable'.
---checkGUIContinue
---  :: Log IO
---  -> DebugTag
---  -> String
---  -> Lens' Gtk2Provider (ConnectReact event)
---  -> Consequence a
---  -> GtkState ()
---checkGUIContinue logIO sel what connectReact = \ case
---  EventHandlerHalt       ->
---    forceDisconnect logIO (_infra<>sel) (what++"(on EventHandlerHalt)") connectReact
---  EventHandlerFail   msg ->
---    forceDisconnect logIO (_infra<>sel) (what++"(on EventHandlerFail "++show msg++")") connectReact
---  EventHandlerCancel     -> return ()
---  EventHandlerContinue{} -> liftIO $ logIO (_infra<>sel) $ what++"-- evaluated to 'GUIControl'"
-
----- | This function should be evaluated from within a 'GtkGUI' function when it is necessary to
----- update the 'Gtk2Provider', usually this is for installing or removing event handlers.
---liftGtkStateIntoGUI :: DebugTag -> String -> GtkState a -> GtkGUI model a
---liftGtkStateIntoGUI sel what f = do
---  logIO <- mkLogger "liftGtkStateIntoGUI"
---  getGUIState >>= \ gui -> case theGUIProvider gui of
---    GtkUnlockedWin{} -> error $ "liftGtkStateIntoGUI: " ++
---      "Evaluated a GtkState function within a GtkGUI function on a locked GtkWindow."
---      -- The 'window' value passed to the 'evalGUI' function must be a 'GtkLockedWin' constructor.
---    GtkLockedWin env -> do
---      (a, env) <- liftIO $ logSubIO logIO (_infra<>sel) ("runGtkState "++what) $
---        runGtkState f env
---      putGUIState $ gui{ theGUIProvider = GtkLockedWin env }
---      return a
-
 -- | Create the window and install the permanent event handlers.
 gtkNewWindow :: HappletInitConfig -> IO (ProviderStateLock Gtk2Provider)
 gtkNewWindow cfg = do
@@ -431,7 +302,7 @@ gtkNewWindow cfg = do
               , theCairoRenderMode     = VectorMode
               , theCanvasResizeMode    = CanvasResizeClear
               , theGtkCairoSurface     = Nothing
-              , theCairoClipRect       = rect2D
+              , theCairoViewBounds     = rect2D
               , theCairoScreenPrinterState = screenPrinterState
               }
           , theAudioPlaybackThread   = StereoPlaybackThread Nothing audio
@@ -1182,7 +1053,7 @@ instance HappletWindow Gtk2Provider CairoRender where
   onOSBuffer                = liftGUIProvider . evalCairoOnGtkDrawable
 
   windowClipRegion          = ConfigState
-    { getConfig = onCanvas $ CairoRender $ Just <$> use cairoClipRect
+    { getConfig = onCanvas $ CairoRender $ Just <$> use cairoViewBounds
     , setConfig = \ case
         Nothing   -> do
           winsize <- liftGUIProvider $ do
@@ -1191,11 +1062,11 @@ instance HappletWindow Gtk2Provider CairoRender where
               fmap (($ point2D) . (pointXY .~) . (fromIntegral *** fromIntegral)) .
               Gtk.drawableGetSize . gtkDrawWindow
           onCanvas $ do
-            cairoClipRect .= (rect2D & rect2DHead .~ winsize)
+            cairoViewBounds .= (rect2D & rect2DHead .~ winsize)
             cairoRender Cairo.restore
         Just irect -> onCanvas $ do
           let rect = realToFrac <$> irect :: Rect2D Double
-          cairoClipRect .= irect
+          cairoViewBounds .= irect
           cairoRender $ do
             Cairo.save
             let tail = rect ^. rect2DTail

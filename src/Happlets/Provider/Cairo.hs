@@ -91,7 +91,7 @@ runCairoRender winsize rendst (CairoRender render) =
 data CairoRenderState
   = CairoRenderState
     { theCairoKeepWinSize        :: !PixSize
-    , theCairoClipRect           :: !(Rect2D SampCoord)
+    , theCairoViewBounds         :: !(Rect2D SampCoord)
     , theCanvasResizeMode        :: !CanvasResizeMode
     , theCairoRenderMode         :: !CairoRenderMode
     , theCairoScreenPrinterState :: !ScreenPrinterState
@@ -109,8 +109,8 @@ data CairoRenderMode
 cairoKeepWinSize :: Lens' CairoRenderState PixSize
 cairoKeepWinSize = lens theCairoKeepWinSize $ \ a b -> a{ theCairoKeepWinSize = b }
 
-cairoClipRect :: Lens' CairoRenderState (Rect2D SampCoord)
-cairoClipRect = lens theCairoClipRect $ \ a b -> a{ theCairoClipRect = b }
+cairoViewBounds :: Lens' CairoRenderState (Rect2D SampCoord)
+cairoViewBounds = lens theCairoViewBounds $ \ a b -> a{ theCairoViewBounds = b }
 
 canvasResizeMode :: Lens' CairoRenderState CanvasResizeMode
 canvasResizeMode = lens theCanvasResizeMode $ \ a b -> a{ theCanvasResizeMode = b }
@@ -407,6 +407,9 @@ cairoClearCanvas r g b a = do
 
 ----------------------------------------------------------------------------------------------------
 
+instance Sized2DRaster CairoRender where
+  getViewSize = CairoRender $ rect2DSize <$> gets theCairoViewBounds
+
 instance Happlet2DGraphics CairoRender where
   pixel p = let (V2 x y) = realToFrac <$> p in ConfigState
     { setConfig = \ color -> do
@@ -557,9 +560,9 @@ cairo2DCubic d = do
 cairoClipRegion :: ConfigState CairoRender (Rect2D SampCoord)
 cairoClipRegion = ConfigState
   { setConfig = \ rect -> do
-      cairoClipRect .= rect
+      cairoViewBounds .= rect
       cairoRender $ Cairo.resetClip >> cairoRectangle (toRational <$> rect) >> Cairo.clip
-  , getConfig = use cairoClipRect
+  , getConfig = use cairoViewBounds
   }
 
 ---- | Calls the internal Cairo API function 'Cairo.setOperator' to update the blit operator state.
