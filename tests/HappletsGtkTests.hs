@@ -10,7 +10,7 @@ import           Data.Time.Clock (UTCTime, getCurrentTime, diffUTCTime)
 
 import qualified Graphics.Rendering.Cairo as Cairo
 
-----------------------------------------------------------------------------------------------------
+-- =================================================================================================
 
 -- This data structure contains the GUI functions which initialize each Happlet that can be attached
 -- to the test suite window.
@@ -43,6 +43,8 @@ main = happlet gtkHapplet $ do
 
   redgrid     <- newHapplet (RedGrid 64.0 Nothing Nothing)
 
+  grapher     <- initGrapherHapplet
+
   let testSuite = TestSuite
         { testSuiteSharedState = mvar
         , switchToPulseCircle  = changeRootHapplet pulsecircle $ pulseCircleGUI testSuite
@@ -51,7 +53,7 @@ main = happlet gtkHapplet $ do
 
   attachWindow True redgrid $ redGridGUI testSuite
 
-----------------------------------------------------------------------------------------------------
+-- =================================================================================================
 
 data RedGrid
   = RedGrid
@@ -138,7 +140,7 @@ redGridGUI ctx _size = do
     lastMouse .= Just pt1
   getConfig windowSize >>= draw . rect2DSize
 
-----------------------------------------------------------------------------------------------------
+-- =================================================================================================
 
 data PulseCircle
   = PulseCircle
@@ -289,3 +291,78 @@ pulseCircleGUI ctx initSize@(V2 w h) = do
   -- be random garbage.
   model <- get
   onCanvas $ drawDot True model model
+
+-- =================================================================================================
+
+data GridAxis
+  = GridAxis
+    { theAxisColor   :: !Color
+    , theAxisOffset  :: !Double
+    , theAxisScale   :: !Double
+    , theAxisSpacing :: !Double
+    }
+
+data GridOrientation = Horizontal | Vertical
+  deriving (Eq, Ord, Enum, Bounded)
+
+background :: Color -> Script any (TypedActor Color)
+background = actor $ do
+  onDraw $ do
+    size  <- getViewSize
+    color <- ask
+    pure
+      [ Draw2DLines 1 (paintColor color) $
+        to2DShape
+        ( rect2D
+          & rect2DTail .~ V2 0 0
+          & rect2DHead .~ size
+        )
+      ]
+
+gridAxis :: GridOrientation -> GridAxis -> Script any (TypedActor GridAxis)
+gridAxis horiz = actor $ do
+  onDraw $ do
+    axis <- ask
+    size <- getViewSize
+    pure
+      [ 
+      ]
+
+----------------------------------------------------------------------------------------------------
+
+data Grapher
+  = Grapher
+    { theGrapherBGColor  :: !Color
+    , theGrapherFGColor  :: !Color
+    , theGrapherGridSize :: !SampCoord
+    , theGrapherMode     :: !GrapherMouseMode
+    }
+
+data GrapherMouseMode
+  = GMModeMoveMap
+  | GMModeMoveNode
+  | GMModeCreateNode
+  deriving (Eq, Ord, Enum, Bounded)
+
+initGrapherHappelt :: Initialize Act (Happlet Act)
+initGrapherHapplet =
+  newActHapplet
+  ( Grapher
+    { theGrapherBGColor  = black & alphaChannel ~. 0.9
+    , theGrapherFGColor  = gray
+    , theGrapherGridSize = 25
+    , theGrapherMode     = GMModeCreateNode
+    }
+  ) $ do
+    -- Setup
+    return ()
+
+----------------------------------------------------------------------------------------------------
+
+data GrapherNode
+  = GrapherNode
+    { theNodePosition :: !PixCoord
+    , theNodeColor    :: !Color
+    , theNodeRadius   :: !Double
+    , theNodeText     :: !Strict.Text
+    }
