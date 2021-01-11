@@ -113,3 +113,4 @@ test-suite happlets-lib-gtk-test
     , semigroups
     , text
     , time
+    , vector

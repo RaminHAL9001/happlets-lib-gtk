@@ -1,12 +1,19 @@
 module Main where
 
 import           Happlets.Provider.Gtk2 hiding (trace)
+import           Happlets.Scene
+import           Happlets.View.Color (red)
 
+import           Control.Category ((>>>))
 import           Control.Concurrent
+import           Control.Monad.Reader
 
 import           Data.Maybe
 import qualified Data.Text as Strict
 import           Data.Time.Clock (UTCTime, getCurrentTime, diffUTCTime)
+--import qualified Data.Vector.Mutable as MVec
+
+--import           Linear.V2
 
 import qualified Graphics.Rendering.Cairo as Cairo
 
@@ -19,6 +26,7 @@ data TestSuite
     { testSuiteSharedState :: MVar Strict.Text
     , switchToPulseCircle  :: GtkGUI RedGrid ()
     , switchToRedGrid      :: GtkGUI PulseCircle ()
+    , switchToSceneTest    :: GtkGUI PulseCircle ()
     }
 
 main :: IO ()
@@ -43,12 +51,13 @@ main = happlet gtkHapplet $ do
 
   redgrid     <- newHapplet (RedGrid 64.0 Nothing Nothing)
 
-  grapher     <- initGrapherHapplet
+  scenetest   <- newActHapplet newCircleGroup circleGroupInit
 
   let testSuite = TestSuite
         { testSuiteSharedState = mvar
         , switchToPulseCircle  = changeRootHapplet pulsecircle $ pulseCircleGUI testSuite
         , switchToRedGrid      = changeRootHapplet redgrid     $ redGridGUI     testSuite
+        , switchToSceneTest    = changeRootHapplet scenetest   $ circleGroupGUI testSuite
         }
 
   attachWindow True redgrid $ redGridGUI testSuite
@@ -259,7 +268,7 @@ pulseCircleGUI ctx initSize@(V2 w h) = do
 
   -- Install the mouse event handling function.
   mouseEvents MouseDrag $ \ (Mouse _ down _ button newXY) -> when down $ case button of
-    RightClick -> switchToRedGrid ctx
+    RightClick -> switchToSceneTest ctx
     _          -> do
       old <- get
       pulseCirclePosition .= (realToFrac <$> newXY)
@@ -305,64 +314,138 @@ data GridAxis
 data GridOrientation = Horizontal | Vertical
   deriving (Eq, Ord, Enum, Bounded)
 
+axisColor :: Lens' GridAxis Color
+axisColor = lens theAxisColor $ \ a b -> a{ theAxisColor = b }
+
+axisOffset :: Lens' GridAxis Double
+axisOffset = lens theAxisOffset $ \ a b -> a{ theAxisOffset = b }
+
+axisScale :: Lens' GridAxis Double
+axisScale = lens theAxisScale $ \ a b -> a{ theAxisScale = b }
+
+axisSpacing :: Lens' GridAxis Double
+axisSpacing = lens theAxisSpacing $ \ a b -> a{ theAxisSpacing = b }
+
 background :: Color -> Script any (TypedActor Color)
 background = actor $ do
-  onDraw $ do
-    size  <- getViewSize
-    color <- ask
-    pure
-      [ Draw2DLines 1 (paintColor color) $
-        to2DShape
-        ( rect2D
-          & rect2DTail .~ V2 0 0
-          & rect2DHead .~ size
-        )
-      ]
+  onDraw $ const $ DrawAction
+    { drawActionText = ""
+    , drawAction = do
+        size  <- getViewSize
+        color <- ask
+        pure [to2DShape (FillOnly $ paintColor color) [rect2D & rect2DHead .~ size]]
+    }
 
 gridAxis :: GridOrientation -> GridAxis -> Script any (TypedActor GridAxis)
-gridAxis horiz = actor $ do
-  onDraw $ do
-    axis <- ask
-    size <- getViewSize
-    pure
-      [ 
-      ]
-
-----------------------------------------------------------------------------------------------------
-
-data Grapher
-  = Grapher
-    { theGrapherBGColor  :: !Color
-    , theGrapherFGColor  :: !Color
-    , theGrapherGridSize :: !SampCoord
-    , theGrapherMode     :: !GrapherMouseMode
+gridAxis _orient = actor $ do
+  onDraw $ const $ DrawAction
+    { drawActionText = ""
+    , drawAction = do
+        --axis <- ask
+        _isize@(V2 w h) <- getViewSize
+        --let (V2 wf hf) = fromIntegral <$> isize
+        return $ pure $
+          Draw2DLines 1 (PaintSource BlitSource $ SolidColorSource red)
+          [ line2D &
+            line2DTail .~ V2 (div w 2) 0 &
+            line2DHead .~ V2 (div w 2) h
+          , line2D &
+            line2DTail .~ V2 0 (div h 2) &
+            line2DHead .~ V2 w (div h 2)
+          ]
     }
 
-data GrapherMouseMode
-  = GMModeMoveMap
-  | GMModeMoveNode
-  | GMModeCreateNode
-  deriving (Eq, Ord, Enum, Bounded)
+-- =================================================================================================
 
-initGrapherHappelt :: Initialize Act (Happlet Act)
-initGrapherHapplet =
-  newActHapplet
-  ( Grapher
-    { theGrapherBGColor  = black & alphaChannel ~. 0.9
-    , theGrapherFGColor  = gray
-    , theGrapherGridSize = 25
-    , theGrapherMode     = GMModeCreateNode
+data MobileCircleN n
+  = MobileCircle
+    { theMobCircUniqId   :: !Int
+    , theMobCircOrigin   :: !(V2 n)
+    , theMobCircColorSym :: !ColorSym
     }
-  ) $ do
-    -- Setup
-    return ()
 
-----------------------------------------------------------------------------------------------------
+type MobileCircle = MobileCircleN SampCoord
 
-data GrapherNode
-  = GrapherNode
-    { theNodePosition :: !PixCoord
-    , theNodeColor    :: !Color
-    , theNodeRadius   :: !Double
-    , theNodeText     :: !Strict.Text
+instance Has2DOrigin MobileCircleN where
+  origin2D = lens theMobCircOrigin $ \ a b -> a{ theMobCircOrigin = b }
+
+newtype CircleGroup = CircleGroup Int
+
+newCircleGroup :: CircleGroup
+newCircleGroup = CircleGroup 0
+
+type ColorSym = Int
+
+mobCircRadius :: SampCoord
+mobCircRadius = 20
+
+mobCircColorSym :: Lens' (MobileCircleN n) ColorSym
+mobCircColorSym = lens theMobCircColorSym $ \ a b -> a{ theMobCircColorSym = b }
+
+mobCircUniqId :: Lens' (MobileCircleN n) Int
+mobCircUniqId = lens theMobCircUniqId $ \ a b -> a{ theMobCircUniqId = b }
+
+mobCircInBounds :: Mouse -> Script MobileCircle ()
+mobCircInBounds (Mouse _dev _press _mods _butn evt) = do
+  o <- use origin2D
+  let (V2 x y) = evt - o
+  let r = mobCircRadius
+  guard $ x*x + y*y <= r*r
+
+mobCircIntToColor :: Int -> Color
+mobCircIntToColor = (`mod` 11) >>> \ case
+  1  -> magenta
+  2  -> red
+  3  -> orange
+  4  -> yellow
+  5  -> lime
+  6  -> cyan
+  7  -> blue
+  8  -> purple
+  9  -> olive
+  10 -> grey
+  _  -> white
+
+mobCircRotateColor :: Script MobileCircle ()
+mobCircRotateColor = modifying mobCircColorSym $ (`mod` 11) . (+ 1) 
+
+mobCircInit :: Script MobileCircle ()
+mobCircInit = do
+  uniqId <- gets theMobCircUniqId
+  onDraw $ const $ DrawAction
+    { drawActionText = ""
+    , drawAction = asks $ \ circ ->
+        let color = mobCircIntToColor $ circ ^. mobCircColorSym in
+        let o = circ ^. origin2D in
+        [ Draw2DShapes
+          (StrokeOnly 4 (paintColor color))
+          [Draw2DArc $ origin2D .~ o $ arc2D]
+        ]
     }
+  onClick $ const $ EventAction
+    { theActionText = "MobileCircle " <> Strict.pack (show uniqId) <> " grabFocus"
+    , theAction = mobCircInBounds >=> const grabFocus
+    }
+
+circleGroupInit :: Script CircleGroup ()
+circleGroupInit = do
+  put $ CircleGroup 0
+  onDraw $ const $ DrawConst [Draw2DReset]
+  onRightClick $ const $ EventAction
+    { theActionText = "\"the circle group\""
+    , theAction =
+      \ (Mouse _dev pressed _mods _btn location)
+       -> when pressed $
+          get >>= \ (CircleGroup count) ->
+          when (count < 16) $
+          modify (\ (CircleGroup i) -> CircleGroup (i + 1)) >>
+          actor mobCircInit MobileCircle
+          { theMobCircUniqId = count
+          , theMobCircColorSym = count
+          , theMobCircOrigin = location
+          } >>
+          pure ()
+    }
+
+circleGroupGUI :: TestSuite -> PixSize -> GtkGUI Act ()
+circleGroupGUI = const actWindow
