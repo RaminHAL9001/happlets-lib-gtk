@@ -1,12 +1,11 @@
 module Main where
 
-import           Happlets.Provider.Gtk2 hiding (trace)
+import           Happlets.Provider.Gtk2
 import           Happlets.Scene
 import           Happlets.View.Color (red)
 
 import           Control.Category ((>>>))
 import           Control.Concurrent
-import           Control.Monad.Reader
 
 import           Data.Maybe
 import qualified Data.Text as Strict
@@ -88,7 +87,7 @@ redGridDraw scale winsize@(V2 w h) =
           (line2DTail .~ v2 i 0) &
           (line2DHead .~ v2 i top)
     clearScreen (black & alphaChannel .~ 0.9)
-    draw2D Nothing $
+    draw2D mempty $ drawing
       [ Draw2DLines 1
         (paintColor red) $
         ( (\ i -> mkLine V2 h $ floor $ scale * realToFrac i) <$>
@@ -328,32 +327,28 @@ axisSpacing = lens theAxisSpacing $ \ a b -> a{ theAxisSpacing = b }
 
 background :: Color -> Script any (TypedActor Color)
 background = actor $ do
-  onDraw $ const $ DrawAction
-    { drawActionText = ""
-    , drawAction = do
-        size  <- getViewSize
-        color <- ask
-        pure [to2DShape (FillOnly $ paintColor color) [rect2D & rect2DHead .~ size]]
-    }
+  color <- get
+  size <- getViewSize
+  onDraw $ drawing
+    [ to2DShape
+      (FillOnly $ paintColor color)
+      [rect2D & rect2DHead .~ size]
+    ]
 
 gridAxis :: GridOrientation -> GridAxis -> Script any (TypedActor GridAxis)
 gridAxis _orient = actor $ do
-  onDraw $ const $ DrawAction
-    { drawActionText = ""
-    , drawAction = do
-        --axis <- ask
-        _isize@(V2 w h) <- getViewSize
-        --let (V2 wf hf) = fromIntegral <$> isize
-        return $ pure $
-          Draw2DLines 1 (PaintSource BlitSource $ SolidColorSource red)
-          [ line2D &
-            line2DTail .~ V2 (div w 2) 0 &
-            line2DHead .~ V2 (div w 2) h
-          , line2D &
-            line2DTail .~ V2 0 (div h 2) &
-            line2DHead .~ V2 w (div h 2)
-          ]
-    }
+  _isize@(V2 w h) <- getViewSize
+  onDraw $ drawing
+    [ Draw2DLines 1
+      (PaintSource BlitSource $ SolidColorSource red)
+      [ line2D &
+        line2DTail .~ V2 (div w 2) 0 &
+        line2DHead .~ V2 (div w 2) h
+      , line2D &
+        line2DTail .~ V2 0 (div h 2) &
+        line2DHead .~ V2 w (div h 2)
+      ]
+    ]
 
 -- =================================================================================================
 
@@ -412,16 +407,13 @@ mobCircRotateColor = modifying mobCircColorSym $ (`mod` 11) . (+ 1)
 mobCircInit :: Script MobileCircle ()
 mobCircInit = do
   uniqId <- gets theMobCircUniqId
-  onDraw $ const $ DrawAction
-    { drawActionText = ""
-    , drawAction = asks $ \ circ ->
-        let color = mobCircIntToColor $ circ ^. mobCircColorSym in
-        let o = circ ^. origin2D in
-        [ Draw2DShapes
-          (StrokeOnly 4 (paintColor color))
-          [Draw2DArc $ origin2D .~ o $ arc2D]
-        ]
-    }
+  o <- gets theMobCircOrigin
+  color <- gets $ mobCircIntToColor . theMobCircColorSym
+  onDraw $ drawing
+    [ Draw2DShapes
+      (StrokeOnly 4 (paintColor color))
+      [Draw2DArc $ origin2D .~ o $ arc2D]
+    ]
   onClick $ const $ EventAction
     { theActionText = "MobileCircle " <> Strict.pack (show uniqId) <> " grabFocus"
     , theAction = mobCircInBounds >=> const grabFocus
@@ -430,21 +422,20 @@ mobCircInit = do
 circleGroupInit :: Script CircleGroup ()
 circleGroupInit = do
   put $ CircleGroup 0
-  onDraw $ const $ DrawConst [Draw2DReset]
+  onDraw $ drawing [Draw2DReset]
   onRightClick $ const $ EventAction
     { theActionText = "\"the circle group\""
-    , theAction =
-      \ (Mouse _dev pressed _mods _btn location)
-       -> when pressed $
-          get >>= \ (CircleGroup count) ->
-          when (count < 16) $
-          modify (\ (CircleGroup i) -> CircleGroup (i + 1)) >>
-          actor mobCircInit MobileCircle
-          { theMobCircUniqId = count
-          , theMobCircColorSym = count
-          , theMobCircOrigin = location
-          } >>
-          pure ()
+    , theAction = \ (Mouse _dev pressed _mods _btn location) ->
+        when pressed $
+        get >>= \ (CircleGroup count) ->
+        when (count < 16) $
+        modify (\ (CircleGroup i) -> CircleGroup (i + 1)) >>
+        actor mobCircInit MobileCircle
+        { theMobCircUniqId = count
+        , theMobCircColorSym = count
+        , theMobCircOrigin = location
+        } >>
+        pure ()
     }
 
 circleGroupGUI :: TestSuite -> PixSize -> GtkGUI Act ()

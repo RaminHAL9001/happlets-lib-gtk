@@ -1083,7 +1083,7 @@ instance HappletWindow Gtk2Provider CairoRender where
     liftIO $ logWithMVar logIO _drawevt "gtkWindowLive" (gtkWindowLive env) $ \ livest ->
       logSubIO logIO _drawevt "Gtk.renderWithDrawable refreshRegion" $
         Gtk.renderWithDrawable (gtkDrawWindow livest) $
-          forM_ (fmap realToFrac . canonicalRect2D <$> rects) $ \ rect -> do
+          forM_ (fmap realToFrac . canonicalize2DShape <$> rects) $ \ rect -> do
             Cairo.setOperator Cairo.OperatorSource
             Cairo.setSourceSurface (theCairoSurface livest) (0.0) (0.0)
             let (x, y) = rect ^. rect2DTail . pointXY

@@ -1,6 +1,6 @@
 module Happlets.Provider.Cairo where
 
-import           Happlets hiding (trace)
+import           Happlets
 import           Happlets.Provider.Gtk2.Debug
 
 import           Control.Arrow
@@ -350,7 +350,7 @@ cairoDrawPath color width =
 cairoRectangle :: RealFrac n => Rect2D n -> Cairo.Render ()
 cairoRectangle rect = do
   cairoMoveTo $ rect ^. rect2DTail
-  let (tail, head) = (realToFrac <$> canonicalRect2D rect) ^. rect2DPoints
+  let (tail, head) = (realToFrac <$> canonicalize2DShape rect) ^. rect2DPoints
   let (x, y) = tail ^. pointXY
   let (w, h) = (head - tail) ^. pointXY
   Cairo.rectangle x y w h
@@ -427,9 +427,17 @@ instance Happlet2DGraphics CairoRender where
 
   clearScreen = unpackRGBA32Color >>> \ (r,g,b,a) -> cairoRender $ cairoClearCanvas r g b a
 
-  draw2D clipBounds primitives = cairoPreserve $ do
-    maybe (pure ()) (setConfig cairoClipRegion) clipBounds
-    cairoRender $ mapM_ cairoDrawPrimitive primitives
+  draw2D clipRegion primitives =
+    cairoPreserve $
+    cairoRender $
+    when (drawingIntersects primitives clipRegion) $ do
+      -- Semantics of 'draw2D' requires the clip region to only be set if the given 'Rect2DUnion' is
+      -- non-null, otherwise the entire canvas is unclipped.
+      Cairo.resetClip
+      unless (rect2DUnionNull clipRegion) $ do
+        mapM_ (cairoRectangle . (toRational <$>)) $ rect2DUnionToList clipRegion
+        Cairo.clip
+      mapM_ cairoDrawPrimitive $ drawingPrimitives primitives
 
   --fill = cairoDrawWithSource canvasFillColor Cairo.fill
   --stroke = cairoDrawWithSource canvasStrokeColor Cairo.stroke
