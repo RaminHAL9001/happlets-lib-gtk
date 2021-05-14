@@ -16,6 +16,8 @@ import           Data.Time.Clock (UTCTime, getCurrentTime, diffUTCTime)
 
 import qualified Graphics.Rendering.Cairo as Cairo
 
+import Debug.Trace
+
 -- =================================================================================================
 
 -- This data structure contains the GUI functions which initialize each Happlet that can be attached
@@ -409,14 +411,14 @@ mobCircInit = do
   uniqId <- gets theMobCircUniqId
   o <- gets theMobCircOrigin
   color <- gets $ mobCircIntToColor . theMobCircColorSym
-  onDraw $ drawing
+  onDraw $ trace ("MobileCircle onDraw handler: color=" <> show color) $ drawing
     [ Draw2DShapes
       (StrokeOnly 4 (paintColor color))
       [Draw2DArc $ origin2D .~ o $ arc2D]
     ]
   onClick $ const $ EventAction
     { theActionText = "MobileCircle " <> Strict.pack (show uniqId) <> " grabFocus"
-    , theAction = mobCircInBounds >=> const grabFocus
+    , theAction = trace "MobileCircle onClick handler" $ mobCircInBounds >=> const (trace "MobileCircle onClick -> grabFocus" grabFocus)
     }
 
 circleGroupInit :: Script CircleGroup ()

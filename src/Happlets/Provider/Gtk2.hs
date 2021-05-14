@@ -165,6 +165,7 @@ data Gtk2Provider
 
 instance MonadProvider Gtk2Provider GtkState where
   runProviderIO (GtkState f) = runStateT f
+  providerConfig = currentConfig
   contextSwitcher = lens theContextSwitcher $ \ a b -> a{ theContextSwitcher = b }
   providerSharedState = thisWindow
   getProviderWindowSize = do
@@ -1186,10 +1187,8 @@ instance AudioPlayback (GUI Gtk2Provider model) where
 -- 'Happlets.GUI.runGUI' in the @main@ function of your Happlet program.
 gtkHapplet :: Provider Gtk2Provider
 gtkHapplet = Provider
-  { defaultConfig = happletInitConfig &~ do
+  { defaultConfig = do
       initConfigFilePath         .= ""
-      registeredAppName          .= "Happlet"
-      initWindowTitleBar         .= "Happlet"
       initBackgroundTransparency .= Just 0.9
       initBackgroundGreyValue    .= 1.0
       recommendWindowPosition    .= (0, 30)
