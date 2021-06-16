@@ -36,6 +36,7 @@ main = happlet gtkHapplet $ do
   initWindowTitleBar  .= "Happlets Test"
   recommendWindowSize .= (640, 480)
   quitOnWindowClose   .= True
+  setMinLogReportLevel DEBUG
 
   mvar        <- liftIO $ newMVar "Main"
   thisThread  <- liftIO myThreadId
@@ -52,13 +53,13 @@ main = happlet gtkHapplet $ do
 
   redgrid     <- newHapplet (RedGrid 64.0 Nothing Nothing)
 
-  scenetest   <- newActHapplet newCircleGroup circleGroupInit
+  scenetest   <- newActHapplet circleGroupInit
 
   let testSuite = TestSuite
         { testSuiteSharedState = mvar
         , switchToPulseCircle  = changeRootHapplet pulsecircle $ pulseCircleGUI testSuite
         , switchToRedGrid      = changeRootHapplet redgrid     $ redGridGUI     testSuite
-        , switchToSceneTest    = changeRootHapplet scenetest   $ circleGroupGUI testSuite
+        , switchToSceneTest    = changeRootHapplet scenetest   $ circleGroupGUI
         }
 
   attachWindow True redgrid $ redGridGUI testSuite
@@ -366,8 +367,6 @@ type MobileCircle = MobileCircleN SampCoord
 instance Has2DOrigin MobileCircleN where
   origin2D = lens theMobCircOrigin $ \ a b -> a{ theMobCircOrigin = b }
 
-newtype CircleGroup = CircleGroup Int
-
 newCircleGroup :: CircleGroup
 newCircleGroup = CircleGroup 0
 
@@ -411,6 +410,9 @@ mobCircInit = do
   uniqId <- gets theMobCircUniqId
   o <- gets theMobCircOrigin
   color <- gets $ mobCircIntToColor . theMobCircColorSym
+  let label = Strict.pack $ show uniqId <> " " <> show color <> " " <> show o
+  selfLabel $ const label
+  report DEBUG $ "exec: mobCircInit (" <> label <> ")"
   onDraw $ trace ("MobileCircle onDraw handler: color=" <> show color) $ drawing
     [ Draw2DShapes
       (StrokeOnly 4 (paintColor color))
@@ -418,27 +420,45 @@ mobCircInit = do
     ]
   onClick $ const $ EventAction
     { theActionText = "MobileCircle " <> Strict.pack (show uniqId) <> " grabFocus"
-    , theAction = trace "MobileCircle onClick handler" $ mobCircInBounds >=> const (trace "MobileCircle onClick -> grabFocus" grabFocus)
+    , theAction =
+      trace "MobileCircle onClick handler" $
+      mobCircInBounds >=> const (trace "MobileCircle onClick -> grabFocus" grabFocus)
     }
 
-circleGroupInit :: Script CircleGroup ()
-circleGroupInit = do
+newtype CircleGroup = CircleGroup Int
+
+circleGroupDesktop :: Script CircleGroup ()
+circleGroupDesktop = do
+  selfLabel $ const "CircleGroup"
+  report DEBUG "exec: circleGroupDesktop"
   put $ CircleGroup 0
   onDraw $ drawing [Draw2DReset]
   onRightClick $ const $ EventAction
     { theActionText = "\"the circle group\""
-    , theAction = \ (Mouse _dev pressed _mods _btn location) ->
-        when pressed $
-        get >>= \ (CircleGroup count) ->
-        when (count < 16) $
-        modify (\ (CircleGroup i) -> CircleGroup (i + 1)) >>
-        actor mobCircInit MobileCircle
-        { theMobCircUniqId = count
-        , theMobCircColorSym = count
-        , theMobCircOrigin = location
-        } >>
-        pure ()
+    , theAction = \ (Mouse _dev pressed _mods _btn location) -> do
+        report DEBUG "CircleGroup.onRightClick action triggered"
+        when pressed $ do
+          (CircleGroup count) <- get
+          when (count < 16) $ do
+            modify (\ (CircleGroup i) -> CircleGroup (i + 1))
+            actor mobCircInit MobileCircle
+              { theMobCircUniqId = count
+              , theMobCircColorSym = count
+              , theMobCircOrigin = location
+              }
+            pure ()
     }
+  stats <- getEventHandlerStats
+  report DEBUG $ "after circleGroupDesktop:\n" <> Strict.pack (show stats)
 
-circleGroupGUI :: TestSuite -> PixSize -> GtkGUI Act ()
-circleGroupGUI = const actWindow
+circleGroupInit :: Script Scene ()
+circleGroupInit = do
+  report DEBUG "exec: circleGroupInit"
+  actor circleGroupDesktop newCircleGroup >>= onStage
+  stats <- getEventHandlerStats
+  report DEBUG $ "after circleGroupInit:\n" <> Strict.pack (show stats)
+
+circleGroupGUI :: PixSize -> GtkGUI Act ()
+circleGroupGUI size = do
+  report DEBUG "exec: changeRootHapplet circleGroupGUI"
+  actWindow size

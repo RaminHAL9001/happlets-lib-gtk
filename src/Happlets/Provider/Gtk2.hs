@@ -138,7 +138,7 @@ data GtkWindowLive
 
 data Gtk2Provider
   = Gtk2Provider
-    { currentConfig           :: !HappletInitConfig
+    { currentConfig           :: !InitConfig
     , thisWindow              :: !(ProviderStateLock Gtk2Provider)
       -- ^ While a GUI function is evaluating, 'theGUIProvider' is always locked, i.e. set to the
       -- 'GtkLockedWin' state. This is problematic for spawning new threads, because the new thread
@@ -156,16 +156,18 @@ data Gtk2Provider
     , theResizeReaction       :: !(ConnectReact GtkState (OldPixSize, NewPixSize))
     , theVisibilityReaction   :: !(ConnectReact GtkState Bool)
     , theFocusReaction        :: !(ConnectReact GtkState Bool)
-    , theMouseHandler         :: !(ConnectReact GtkState Mouse)
+    , theMouseHandler         :: !(ConnectReact GtkState MouseSignal)
     , theKeyHandler           :: !(ConnectReact GtkState Keyboard)
     , theDetatchHandler       :: !(ConnectReact GtkState ())
     , theAnimatorThread       :: !(ConnectReact GtkState UTCTime)
     , theContextSwitcher      :: !(GtkState (Consequence ()))
     }
 
+instance ProvidesLogReporter Gtk2Provider where
+  providesLogReporter = theActualLogReporter . currentConfig
+
 instance MonadProvider Gtk2Provider GtkState where
   runProviderIO (GtkState f) = runStateT f
-  providerConfig = currentConfig
   contextSwitcher = lens theContextSwitcher $ \ a b -> a{ theContextSwitcher = b }
   providerSharedState = thisWindow
   getProviderWindowSize = do
@@ -208,7 +210,7 @@ focusReaction = lens theFocusReaction $ \ a b -> a{ theFocusReaction = b }
 resizeReaction :: Lens' Gtk2Provider (ConnectReact GtkState (OldPixSize, NewPixSize))
 resizeReaction = lens theResizeReaction $ \ a b -> a{ theResizeReaction = b }
 
-mouseHandler :: Lens' Gtk2Provider (ConnectReact GtkState Mouse)
+mouseHandler :: Lens' Gtk2Provider (ConnectReact GtkState MouseSignal)
 mouseHandler = lens theMouseHandler $ \ a b -> a{ theMouseHandler = b }
 
 keyHandler :: Lens' Gtk2Provider (ConnectReact GtkState Keyboard)
@@ -262,10 +264,9 @@ instance MonadIO GtkState where
   liftIO = GtkState . liftIO
 
 -- | Create the window and install the permanent event handlers.
-gtkNewWindow :: HappletInitConfig -> IO (ProviderStateLock Gtk2Provider)
+gtkNewWindow :: InitConfig -> IO (ProviderStateLock Gtk2Provider)
 gtkNewWindow cfg = do
   logIO <- mkLogger "createWin"
-  forM_ (initConfigErrorsOnLoad cfg) (hPrint stderr)
   -- new window --
   logIO _setup $ "Gtk.windowNew"
   window <- Gtk.windowNew
@@ -511,7 +512,7 @@ resizeGtkDrawContext canvas size = do
 -- | Allocates a new 'GtkWindowLive', including the 'Gtk.Pixmap' buffer and 'Gtk.GC' graphics
 -- context. The buffer allocated will be exactly the dimensions given without checking if the size
 -- is valid, and invalid demensions will crash the thread.
-newGtkWindowLive :: HappletInitConfig -> Gtk.DrawWindow -> (Int, Int) -> IO GtkWindowLive
+newGtkWindowLive :: InitConfig -> Gtk.DrawWindow -> (Int, Int) -> IO GtkWindowLive
 newGtkWindowLive cfg canvas (w, h) = do
   logIO <- mkLogger "gtkAllocNewPixmap"
 #if USE_CAIRO_SURFACE_BUFFER
@@ -730,30 +731,37 @@ instance CanAnimate Gtk2Provider where
   animationIsRunning = liftGUIProvider $
     gets theAnimatorThread <&> \ case { Disconnected -> False; _ -> True; }
   stepFrameEvents react = do
-    installEventHandler EventSetup
-      {
-      --eventDebugTag     = _animevt
-        eventDescription  = "stepFrameEvents"
-      , eventLensReaction = animatorThread
-      , eventPreInstall   = return ()
-      , eventInstall      = \ env next ->
-          let rate = env & view animationFrameRate . currentConfig in
-          Glib.timeoutRemove <$>
-          Glib.timeoutAdd
-          (getCurrentTime >>= next >> return True)
-          (min 200 $ floor (1000.0 / rate))
-      , eventGUIReaction  = react
-      }
+    let disconnect = do
+          report DEBUG $ "animatorThread disconnect"
+          liftGUIProvider (forceDisconnect animatorThread)
+          return False
     -- The 'react' function needs to be evaluated here at time 0, becuase 'timeoutAdd' does not call
     -- it until after the first time step interval has passed. For slow animations, this will cause
     -- a noticable delay between the time the 'stepFrameEvents' function is evaluated and the first
     -- frame callback is evaluated.
-    let disconnect = liftGUIProvider $ forceDisconnect animatorThread
-    guiCatch (liftIO getCurrentTime >>= react) $ \ case
-      ActionOK ()      -> return ()
+    ok <- guiCatch (liftIO getCurrentTime >>= react) $ \ case
+      ActionOK ()      -> return True
       ActionFail  _msg -> disconnect
       ActionCancel     -> disconnect
-      ActionHalt       -> disconnect
+      ActionHalt       -> return True
+    -- If the first iteration of 'react' above did not evaluate to 'fail' or 'cancel', then we
+    -- should go ahead and install the actual event handler.
+    when ok $ do
+      report DEBUG $ "animatorThread installEventHandler"
+      installEventHandler EventSetup
+        {
+        --eventDebugTag     = _animevt
+          eventDescription  = "stepFrameEvents"
+        , eventLensReaction = animatorThread
+        , eventPreInstall   = return ()
+        , eventInstall      = \ env next ->
+            let rate = env & view animationFrameRate . currentConfig in
+            Glib.timeoutRemove <$>
+            Glib.timeoutAdd
+            (getCurrentTime >>= next >> return True)
+            (min 200 $ floor (1000.0 / rate))
+        , eventGUIReaction  = react
+        }
 
 instance CanKeyboard Gtk2Provider where
   keyboardEvents react = installEventHandler EventSetup
@@ -776,7 +784,7 @@ instance CanKeyboard Gtk2Provider where
 
 instance CanMouse Gtk2Provider where
   providedMouseDevices = return []
-  mouseEvents          = \ case
+  mouseSignals          = \ case
     MouseButton -> \ react -> installEventHandler EventSetup
       {
       --eventDebugTag     = _mousevt
@@ -853,22 +861,22 @@ instance CanMouse Gtk2Provider where
 
 ----------------------------------------------------------------------------------------------------
 
-handleMouse :: Pressed -> Gtk.EventM Gtk.EButton Mouse
+handleMouse :: Pressed -> Gtk.EventM Gtk.EButton MouseSignal
 handleMouse upDown = do
   logIO <- mkLogger "handleMouse"
   (x, y) <- Gtk.eventCoordinates
   button <- getMouseButton
   mods   <- packGtkModifiers <$> Gtk.eventModifierAll
-  let evt = Mouse "" upDown mods button (V2 (round x) (round y))
+  let evt = MouseSignal "" upDown mods button (V2 (round x) (round y))
   liftIO $ logIO _mousevt $ show evt
   return evt
 
-handleCursor :: Pressed -> Gtk.EventM Gtk.EMotion Mouse
+handleCursor :: Pressed -> Gtk.EventM Gtk.EMotion MouseSignal
 handleCursor upDown = do
   logIO <- mkLogger "handleCursor"
   (x, y) <- Gtk.eventCoordinates
   mods   <- packGtkModifiers <$> Gtk.eventModifierAll
-  let evt = Mouse "" upDown mods MotionOnly (V2 (round x) (round y))
+  let evt = MouseSignal "" upDown mods MotionOnly (V2 (round x) (round y))
   liftIO $ logIO _mousevt $ show evt
   return evt
 
@@ -894,7 +902,7 @@ handleKey upDown = do
   liftIO $ logIO _keyevt $ show evt
   return evt
 
-getMouseButton :: Gtk.EventM Gtk.EButton MouseButton
+getMouseButton :: Gtk.EventM Gtk.EButton MouseButtonSignal
 getMouseButton = Gtk.eventButton <&> \ case
   Gtk.LeftButton    -> LeftClick
   Gtk.MiddleButton  -> MiddleClick
@@ -1223,7 +1231,7 @@ gtkInit = do
 -- | Launch the Gtk+ main event loop. This function is usually called via the
 -- 'Happlets.Initialize.launchGUIEventLoop' function, which is automatically called by the
 -- 'Happlets.Initialize.happlet' function.
-gtkLaunchEventLoop :: HappletInitConfig -> IO ()
+gtkLaunchEventLoop :: InitConfig -> IO ()
 gtkLaunchEventLoop cfg = do
   logIO <- mkLogger "gtkEventLoop"
   let appName = cfg ^. registeredAppName
