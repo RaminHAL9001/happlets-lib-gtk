@@ -36,7 +36,7 @@ main = happlet gtkHapplet $ do
   initWindowTitleBar  .= "Happlets Test"
   recommendWindowSize .= (640, 480)
   quitOnWindowClose   .= True
-  setMinLogReportLevel DEBUG
+  setMaxLogReportLevel DEBUG
 
   mvar        <- liftIO $ newMVar "Main"
   thisThread  <- liftIO myThreadId
@@ -115,7 +115,7 @@ redGridGUI ctx _size = do
     putStrLn "change away from Red Grid"
     void $ swapMVar mvar "Red Grid"
   resizeEvents CanvasResizeCopy $ \ _oldsize newsize -> draw newsize
-  mouseEvents MouseAll $ \ (Mouse _ down _ button pt1@(V2 x1 y1)) -> do
+  mouseSignals MouseAll $ \ (MouseSignal _ down _ button pt1@(V2 x1 y1)) -> do
     use lastMouse >>= \ case
       Nothing         -> return ()
       Just (V2 x0 y0) -> refreshRegion
@@ -269,7 +269,7 @@ pulseCircleGUI ctx initSize@(V2 w h) = do
     _ -> return ()
 
   -- Install the mouse event handling function.
-  mouseEvents MouseDrag $ \ (Mouse _ down _ button newXY) -> when down $ case button of
+  mouseSignals MouseDrag $ \ (MouseSignal _ down _ button newXY) -> when down $ case button of
     RightClick -> switchToSceneTest ctx
     _          -> do
       old <- get
@@ -381,8 +381,8 @@ mobCircColorSym = lens theMobCircColorSym $ \ a b -> a{ theMobCircColorSym = b }
 mobCircUniqId :: Lens' (MobileCircleN n) Int
 mobCircUniqId = lens theMobCircUniqId $ \ a b -> a{ theMobCircUniqId = b }
 
-mobCircInBounds :: Mouse -> Script MobileCircle ()
-mobCircInBounds (Mouse _dev _press _mods _butn evt) = do
+mobCircInBounds :: PixelMouse -> Script MobileCircle ()
+mobCircInBounds (Mouse2D evt _) = do
   o <- use origin2D
   let (V2 x y) = evt - o
   let r = mobCircRadius
@@ -418,7 +418,7 @@ mobCircInit = do
       (StrokeOnly 4 (paintColor color))
       [Draw2DArc $ origin2D .~ o $ arc2D]
     ]
-  onClick $ const $ EventAction
+  onMouseDown RightMouseButton $ const $ EventAction
     { theActionText = "MobileCircle " <> Strict.pack (show uniqId) <> " grabFocus"
     , theAction =
       trace "MobileCircle onClick handler" $
@@ -433,20 +433,19 @@ circleGroupDesktop = do
   report DEBUG "exec: circleGroupDesktop"
   put $ CircleGroup 0
   onDraw $ drawing [Draw2DReset]
-  onRightClick $ const $ EventAction
+  onMouseDown RightMouseButton $ const $ EventAction
     { theActionText = "\"the circle group\""
-    , theAction = \ (Mouse _dev pressed _mods _btn location) -> do
+    , theAction = \ (Mouse2D location _) -> do
         report DEBUG "CircleGroup.onRightClick action triggered"
-        when pressed $ do
-          (CircleGroup count) <- get
-          when (count < 16) $ do
-            modify (\ (CircleGroup i) -> CircleGroup (i + 1))
-            actor mobCircInit MobileCircle
-              { theMobCircUniqId = count
-              , theMobCircColorSym = count
-              , theMobCircOrigin = location
-              }
-            pure ()
+        (CircleGroup count) <- get
+        when (count < 16) $ do
+          modify (\ (CircleGroup i) -> CircleGroup (i + 1))
+          actor mobCircInit MobileCircle
+            { theMobCircUniqId = count
+            , theMobCircColorSym = count
+            , theMobCircOrigin = location
+            }
+          pure ()
     }
   stats <- getEventHandlerStats
   report DEBUG $ "after circleGroupDesktop:\n" <> Strict.pack (show stats)
