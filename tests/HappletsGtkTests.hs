@@ -418,7 +418,7 @@ mobCircInit = do
       (StrokeOnly 4 (paintColor color))
       [Draw2DArc $ origin2D .~ o $ arc2D]
     ]
-  onMouseDown RightMouseButton $ const $ EventAction
+  onMouseDown LeftMouseButton $ const $ EventAction
     { theActionText = "MobileCircle " <> Strict.pack (show uniqId) <> " grabFocus"
     , theAction =
       trace "MobileCircle onClick handler" $
@@ -440,11 +440,11 @@ circleGroupDesktop = do
         (CircleGroup count) <- get
         when (count < 16) $ do
           modify (\ (CircleGroup i) -> CircleGroup (i + 1))
-          actor mobCircInit MobileCircle
+          ( actor mobCircInit MobileCircle
             { theMobCircUniqId = count
             , theMobCircColorSym = count
             , theMobCircOrigin = location
-            }
+            }) >>= onStage
           pure ()
     }
   stats <- getEventHandlerStats
