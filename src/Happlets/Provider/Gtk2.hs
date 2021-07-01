@@ -732,7 +732,7 @@ instance CanAnimate Gtk2Provider where
     gets theAnimatorThread <&> \ case { Disconnected -> False; _ -> True; }
   stepFrameEvents react = do
     let disconnect = do
-          report DEBUG $ "animatorThread disconnect"
+          report OBJECT $ "animatorThread disconnect"
           liftGUIProvider (forceDisconnect animatorThread)
           return False
     -- The 'react' function needs to be evaluated here at time 0, becuase 'timeoutAdd' does not call
@@ -747,7 +747,7 @@ instance CanAnimate Gtk2Provider where
     -- If the first iteration of 'react' above did not evaluate to 'fail' or 'cancel', then we
     -- should go ahead and install the actual event handler.
     when ok $ do
-      report DEBUG $ "animatorThread installEventHandler"
+      report OBJECT $ "animatorThread installEventHandler"
       installEventHandler EventSetup
         {
         --eventDebugTag     = _animevt

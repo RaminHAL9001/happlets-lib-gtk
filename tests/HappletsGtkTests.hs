@@ -36,7 +36,7 @@ main = happlet gtkHapplet $ do
   initWindowTitleBar  .= "Happlets Test"
   recommendWindowSize .= (640, 480)
   quitOnWindowClose   .= True
-  setMaxLogReportLevel DEBUG
+  setMinLogReportLevel DEBUG_ALL
 
   mvar        <- liftIO $ newMVar "Main"
   thisThread  <- liftIO myThreadId
@@ -412,7 +412,7 @@ mobCircInit = do
   color <- gets $ mobCircIntToColor . theMobCircColorSym
   let label = Strict.pack $ show uniqId <> " " <> show color <> " " <> show o
   selfLabel $ const label
-  report DEBUG $ "exec: mobCircInit (" <> label <> ")"
+  report OBJECT $ "exec: mobCircInit (" <> label <> ")"
   onDraw $ trace ("MobileCircle onDraw handler: color=" <> show color) $ drawing
     [ Draw2DShapes
       (StrokeOnly 4 (paintColor color))
@@ -430,36 +430,36 @@ newtype CircleGroup = CircleGroup Int
 circleGroupDesktop :: Script CircleGroup ()
 circleGroupDesktop = do
   selfLabel $ const "CircleGroup"
-  report DEBUG "exec: circleGroupDesktop"
+  report OBJECT "exec: circleGroupDesktop"
   put $ CircleGroup 0
   onDraw $ drawing [Draw2DReset]
   onMouseDown RightMouseButton $ const $ EventAction
     { theActionText = "\"the circle group\""
     , theAction = \ (Mouse2D location _) -> do
-        report DEBUG "CircleGroup.onRightClick action triggered"
+        report EVENT "CircleGroup.onRightClick action triggered"
         (CircleGroup count) <- get
         when (count < 16) $ do
-          debugSceneElements "before onMouseDown RightMoustButton for CircleGroup"
+          --debugSceneElements "before onMouseDown RightMoustButton for CircleGroup"
           modify (\ (CircleGroup i) -> CircleGroup (i + 1))
           ( actor mobCircInit MobileCircle
             { theMobCircUniqId = count
             , theMobCircColorSym = count
             , theMobCircOrigin = location
             }) >>= onStage
-          debugSceneElements "after onMouseDown RightMoustButton for CircleGroup"
+          --debugSceneElements "after onMouseDown RightMoustButton for CircleGroup"
           pure ()
     }
   stats <- getEventHandlerStats
-  report DEBUG $ "after circleGroupDesktop:\n" <> Strict.pack (show stats)
+  report EVENT $ "after circleGroupDesktop:\n" <> Strict.pack (show stats)
 
 circleGroupInit :: Script Scene ()
 circleGroupInit = do
-  report DEBUG "exec: circleGroupInit"
+  report OBJECT "exec: circleGroupInit"
   actor circleGroupDesktop newCircleGroup >>= onStage
   stats <- getEventHandlerStats
-  report DEBUG $ "after circleGroupInit:\n" <> Strict.pack (show stats)
+  report OBJECT $ "after circleGroupInit:\n" <> Strict.pack (show stats)
 
 circleGroupGUI :: PixSize -> GtkGUI Act ()
 circleGroupGUI size = do
-  report DEBUG "exec: changeRootHapplet circleGroupGUI"
+  report OBJECT "exec: changeRootHapplet circleGroupGUI"
   actWindow size
