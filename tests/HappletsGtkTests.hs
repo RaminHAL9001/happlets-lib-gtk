@@ -439,12 +439,14 @@ circleGroupDesktop = do
         report DEBUG "CircleGroup.onRightClick action triggered"
         (CircleGroup count) <- get
         when (count < 16) $ do
+          debugSceneElements "before onMouseDown RightMoustButton for CircleGroup"
           modify (\ (CircleGroup i) -> CircleGroup (i + 1))
           ( actor mobCircInit MobileCircle
             { theMobCircUniqId = count
             , theMobCircColorSym = count
             , theMobCircOrigin = location
             }) >>= onStage
+          debugSceneElements "after onMouseDown RightMoustButton for CircleGroup"
           pure ()
     }
   stats <- getEventHandlerStats
