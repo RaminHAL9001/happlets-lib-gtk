@@ -425,18 +425,23 @@ instance Happlet2DGraphics CairoRender where
     Cairo.setOperator Cairo.OperatorSource
     cairoResetAntialiasing
 
+  clearRegions u c =
+    unless (rect2DUnionNull u) $
+    cairoPreserve $
+    cairoRender $ do
+      forM_ (rect2DUnionToList u) $ cairoRectangle . fmap toRational
+      let (r,g,b,a) = unpackRGBA32Color c
+      cairoClearCanvas r g b a
+
   clearScreen = unpackRGBA32Color >>> \ (r,g,b,a) -> cairoRender $ cairoClearCanvas r g b a
 
-  draw2D clipRegion primitives =
+  draw2D boundingBox primitives =
+    when (drawingIntersects primitives boundingBox) $
     cairoPreserve $
-    cairoRender $
-    when (drawingIntersects primitives clipRegion) $ do
-      -- Semantics of 'draw2D' requires the clip region to only be set if the given 'Rect2DUnion' is
-      -- non-null, otherwise the entire canvas is unclipped.
+    cairoRender $ do
       Cairo.resetClip
-      unless (rect2DUnionNull clipRegion) $ do
-        mapM_ (cairoRectangle . (toRational <$>)) $ rect2DUnionToList clipRegion
-        Cairo.clip
+      cairoRectangle $ toRational <$> boundingBox
+      Cairo.clip
       mapM_ cairoDrawPrimitive $ drawingPrimitives primitives
 
   --fill = cairoDrawWithSource canvasFillColor Cairo.fill

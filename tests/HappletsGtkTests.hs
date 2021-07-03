@@ -1,7 +1,8 @@
 module Main where
 
+import           Happlets.Actor
 import           Happlets.Provider.Gtk2
-import           Happlets.Scene
+import           Happlets.Model.Registry
 import           Happlets.View.Color (red)
 
 import           Control.Category ((>>>))
@@ -53,7 +54,7 @@ main = happlet gtkHapplet $ do
 
   redgrid     <- newHapplet (RedGrid 64.0 Nothing Nothing)
 
-  scenetest   <- newActHapplet circleGroupInit
+  scenetest   <- newRegistry 16 >>= flip newSceneHapplet . circleGroupInit . CircleGroup
 
   let testSuite = TestSuite
         { testSuiteSharedState = mvar
@@ -328,7 +329,7 @@ axisScale = lens theAxisScale $ \ a b -> a{ theAxisScale = b }
 axisSpacing :: Lens' GridAxis Double
 axisSpacing = lens theAxisSpacing $ \ a b -> a{ theAxisSpacing = b }
 
-background :: Color -> Script any (TypedActor Color)
+background :: Color -> Script any (Actor Color)
 background = actor $ do
   color <- get
   size <- getViewSize
@@ -338,7 +339,7 @@ background = actor $ do
       [rect2D & rect2DHead .~ size]
     ]
 
-gridAxis :: GridOrientation -> GridAxis -> Script any (TypedActor GridAxis)
+gridAxis :: GridOrientation -> GridAxis -> Script any (Actor GridAxis)
 gridAxis _orient = actor $ do
   _isize@(V2 w h) <- getViewSize
   onDraw $ drawing
@@ -355,9 +356,12 @@ gridAxis _orient = actor $ do
 
 -- =================================================================================================
 
+data CircleGroup = CircleGroup (Registry MobileCircle)
+
 data MobileCircleN n
   = MobileCircle
     { theMobCircUniqId   :: !Int
+    , theMobCircSelected :: !Bool
     , theMobCircOrigin   :: !(V2 n)
     , theMobCircColorSym :: !ColorSym
     }
@@ -411,7 +415,7 @@ mobCircInit = do
   o <- gets theMobCircOrigin
   color <- gets $ mobCircIntToColor . theMobCircColorSym
   let label = Strict.pack $ show uniqId <> " " <> show color <> " " <> show o
-  selfLabel $ const label
+  modifySelfLabel $ const label
   report OBJECT $ "exec: mobCircInit (" <> label <> ")"
   onDraw $ trace ("MobileCircle onDraw handler: color=" <> show color) $ drawing
     [ Draw2DShapes
@@ -424,8 +428,6 @@ mobCircInit = do
       trace "MobileCircle onClick handler" $
       mobCircInBounds >=> const (trace "MobileCircle onClick -> grabFocus" grabFocus)
     }
-
-newtype CircleGroup = CircleGroup Int
 
 circleGroupDesktop :: Script CircleGroup ()
 circleGroupDesktop = do
@@ -452,14 +454,14 @@ circleGroupDesktop = do
   stats <- getEventHandlerStats
   report EVENT $ "after circleGroupDesktop:\n" <> Strict.pack (show stats)
 
-circleGroupInit :: Script Scene ()
-circleGroupInit = do
+circleGroupInit :: Registry MobileCircle -> Script CircleGroup ()
+circleGroupInit reg = do
   report OBJECT "exec: circleGroupInit"
   actor circleGroupDesktop newCircleGroup >>= onStage
   stats <- getEventHandlerStats
   report OBJECT $ "after circleGroupInit:\n" <> Strict.pack (show stats)
 
-circleGroupGUI :: PixSize -> GtkGUI Act ()
+circleGroupGUI :: PixSize -> GtkGUI (Scene CircleGroup) ()
 circleGroupGUI size = do
   report OBJECT "exec: changeRootHapplet circleGroupGUI"
   actWindow size
