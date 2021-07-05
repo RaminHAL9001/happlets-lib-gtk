@@ -1,8 +1,8 @@
 module Main where
 
 import           Happlets.Actor
-import           Happlets.Provider.Gtk2
 import           Happlets.Model.Registry
+import           Happlets.Provider.Gtk2
 import           Happlets.View.Color (red)
 
 import           Control.Category ((>>>))
@@ -54,7 +54,7 @@ main = happlet gtkHapplet $ do
 
   redgrid     <- newHapplet (RedGrid 64.0 Nothing Nothing)
 
-  scenetest   <- newRegistry 16 >>= flip newSceneHapplet . circleGroupInit . CircleGroup
+  scenetest   <- liftIO newCircleGroup >>= flip newSceneHapplet circleGroupDesktop
 
   let testSuite = TestSuite
         { testSuiteSharedState = mvar
@@ -91,7 +91,8 @@ redGridDraw scale winsize@(V2 w h) =
           (line2DTail .~ v2 i 0) &
           (line2DHead .~ v2 i top)
     clearScreen (black & alphaChannel .~ 0.9)
-    draw2D mempty $ drawing
+    frame <- getViewRect
+    draw2D frame $ drawing
       [ Draw2DLines 1
         (paintColor red) $
         ( (\ i -> mkLine V2 h $ floor $ scale * realToFrac i) <$>
@@ -356,7 +357,7 @@ gridAxis _orient = actor $ do
 
 -- =================================================================================================
 
-data CircleGroup = CircleGroup (Registry MobileCircle)
+data CircleGroup = CircleGroup (Registry (Actor MobileCircle))
 
 data MobileCircleN n
   = MobileCircle
@@ -371,13 +372,13 @@ type MobileCircle = MobileCircleN SampCoord
 instance Has2DOrigin MobileCircleN where
   origin2D = lens theMobCircOrigin $ \ a b -> a{ theMobCircOrigin = b }
 
-newCircleGroup :: CircleGroup
-newCircleGroup = CircleGroup 0
-
 type ColorSym = Int
 
 mobCircRadius :: SampCoord
 mobCircRadius = 20
+
+mobCircSelected :: Lens' (MobileCircleN n) Bool
+mobCircSelected = lens theMobCircSelected $ \ a b -> a{ theMobCircSelected = b }
 
 mobCircColorSym :: Lens' (MobileCircleN n) ColorSym
 mobCircColorSym = lens theMobCircColorSym $ \ a b -> a{ theMobCircColorSym = b }
@@ -424,44 +425,65 @@ mobCircInit = do
     ]
   onMouseDown LeftMouseButton $ const $ EventAction
     { theActionText = "MobileCircle " <> Strict.pack (show uniqId) <> " grabFocus"
-    , theAction =
+    , theAction = \ event ->
       trace "MobileCircle onClick handler" $
-      mobCircInBounds >=> const (trace "MobileCircle onClick -> grabFocus" grabFocus)
+      mobCircInBounds event >>
+      mobCircSelected .= True
     }
+
+----------------------------------------------------------------------------------------------------
+
+type UpdateCircleGroup fold a = FoldMapRegistry (Actor MobileCircle) fold (Script CircleGroup) a
+
+newCircleGroup :: IO CircleGroup
+newCircleGroup = CircleGroup <$> newRegistry 16
+
+updateCircleGroup
+  :: Bool
+  -> fold
+  -> ( (Actor MobileCircle -> UpdateCircleGroup fold ())
+        -> Actor MobileCircle -> UpdateCircleGroup fold KeepOrDelete
+     )
+  -> Script CircleGroup fold
+updateCircleGroup up fold f = do
+  (CircleGroup reg) <- get
+  reactEventRegistry up unsafeScriptIO f reg fold
+
+drawCircleGroup :: Script CircleGroup ()
+drawCircleGroup =
+  updateCircleGroup True id
+  (\ _upd ->
+    lift . scriptWithActor actorDraw >=> \ d ->
+    modify (. (d :)) >>
+    pure KeepObject
+  ) >>=
+  onDraw . mconcat . ($ [])
 
 circleGroupDesktop :: Script CircleGroup ()
 circleGroupDesktop = do
-  selfLabel $ const "CircleGroup"
+  modifySelfLabel $ const "CircleGroup"
   report OBJECT "exec: circleGroupDesktop"
-  put $ CircleGroup 0
   onDraw $ drawing [Draw2DReset]
   onMouseDown RightMouseButton $ const $ EventAction
     { theActionText = "\"the circle group\""
     , theAction = \ (Mouse2D location _) -> do
         report EVENT "CircleGroup.onRightClick action triggered"
-        (CircleGroup count) <- get
-        when (count < 16) $ do
-          --debugSceneElements "before onMouseDown RightMoustButton for CircleGroup"
-          modify (\ (CircleGroup i) -> CircleGroup (i + 1))
+        (CircleGroup reg) <- get
+        count <- unsafeScriptIO $ registrySize reg
+        when (count < 16) $
           ( actor mobCircInit MobileCircle
             { theMobCircUniqId = count
+            , theMobCircSelected = False
             , theMobCircColorSym = count
             , theMobCircOrigin = location
-            }) >>= onStage
-          --debugSceneElements "after onMouseDown RightMoustButton for CircleGroup"
-          pure ()
+            }
+          ) >>=
+          void . unsafeScriptIO . flip registryEnqueueNew reg
     }
   stats <- getEventHandlerStats
   report EVENT $ "after circleGroupDesktop:\n" <> Strict.pack (show stats)
 
-circleGroupInit :: Registry MobileCircle -> Script CircleGroup ()
-circleGroupInit reg = do
-  report OBJECT "exec: circleGroupInit"
-  actor circleGroupDesktop newCircleGroup >>= onStage
-  stats <- getEventHandlerStats
-  report OBJECT $ "after circleGroupInit:\n" <> Strict.pack (show stats)
-
 circleGroupGUI :: PixSize -> GtkGUI (Scene CircleGroup) ()
 circleGroupGUI size = do
   report OBJECT "exec: changeRootHapplet circleGroupGUI"
-  actWindow size
+  sceneWindow size
