@@ -40,7 +40,7 @@ import           Happlets.View
 import           Happlets.View.Audio
 
 import           Happlets.Provider.Cairo      hiding (mkLogger)
-import           Happlets.Provider.ALSA
+import           Happlets.Provider.ALSA       hiding (gtkAnimationFrameRate)
 import           Happlets.Provider.Gtk2.Debug
 
 import           Control.Concurrent

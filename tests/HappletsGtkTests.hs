@@ -54,13 +54,13 @@ main = happlet gtkHapplet $ do
 
   redgrid     <- newHapplet (RedGrid 64.0 Nothing Nothing)
 
-  scenetest   <- liftIO newCircleGroup >>= flip newSceneHapplet circleGroupDesktop
+  scenetest   <- liftIO newCircleGroup >>= flip newSceneHapplet circleGroupInit
 
   let testSuite = TestSuite
         { testSuiteSharedState = mvar
-        , switchToPulseCircle  = changeRootHapplet pulsecircle $ pulseCircleGUI testSuite
-        , switchToRedGrid      = changeRootHapplet redgrid     $ redGridGUI     testSuite
-        , switchToSceneTest    = changeRootHapplet scenetest   $ circleGroupGUI
+        , switchToPulseCircle  = changeRootHapplet pulsecircle $ pulseCircleGUI       testSuite
+        , switchToRedGrid      = changeRootHapplet redgrid     $ redGridGUI           testSuite
+        , switchToSceneTest    = changeRootHapplet scenetest   $ circleGroupSwitchGUI
         }
 
   attachWindow True redgrid $ redGridGUI testSuite
@@ -453,14 +453,14 @@ drawCircleGroup :: Script CircleGroup ()
 drawCircleGroup =
   updateCircleGroup True id
   (\ _upd ->
-    lift . scriptWithActor actorDraw >=> \ d ->
+    lift . scriptWithActor (actorRedraw >> actorDraw) >=> \ d ->
     modify (. (d :)) >>
     pure KeepObject
   ) >>=
-  onDraw . mconcat . ($ [])
+  onDraw . (\ d -> trace ("drawCircleGroup: " <> show d) d) . mconcat . ($ [])
 
-circleGroupDesktop :: Script CircleGroup ()
-circleGroupDesktop = do
+circleGroupInit :: Script CircleGroup ()
+circleGroupInit = do
   modifySelfLabel $ const "CircleGroup"
   report OBJECT "exec: circleGroupDesktop"
   onDraw $ drawing [Draw2DReset]
@@ -479,11 +479,12 @@ circleGroupDesktop = do
             }
           ) >>=
           void . unsafeScriptIO . flip registryEnqueueNew reg
+        drawCircleGroup
     }
   stats <- getEventHandlerStats
   report EVENT $ "after circleGroupDesktop:\n" <> Strict.pack (show stats)
 
-circleGroupGUI :: PixSize -> GtkGUI (Scene CircleGroup) ()
-circleGroupGUI size = do
+circleGroupSwitchGUI :: PixSize -> GtkGUI (Scene CircleGroup) ()
+circleGroupSwitchGUI size = do
   report OBJECT "exec: changeRootHapplet circleGroupGUI"
   sceneWindow size
