@@ -43,7 +43,6 @@ import           Happlets.Provider.Cairo      hiding (mkLogger)
 import           Happlets.Provider.ALSA
 import           Happlets.Provider.Gtk2.Debug
 
-import           Control.Arrow
 import           Control.Concurrent
 
 import           Data.Bits
@@ -68,7 +67,7 @@ import qualified Graphics.UI.Gtk.General.General    as Gtk
 import qualified Graphics.UI.Gtk.Misc.EventBox      as Gtk
 import qualified Graphics.UI.Gtk.Windows.Window     as Gtk
 
-import           Linear.V2 (V2(..))
+--import           Linear.V2 (V2(..))
 
 import           System.IO
 import           System.IO.Unsafe
@@ -102,6 +101,9 @@ logSubGtk :: Log IO -> DebugTag -> String -> GtkState a -> GtkState a
 logSubGtk logIO sel msg f = get >>=
   liftIO . logSubIO logIO sel msg . runProviderIO f >>= state . const
 {-# INLINE logSubGtk #-}
+
+gtkAnimationFrameRate :: Double
+gtkAnimationFrameRate = 30.0
 
 ----------------------------------------------------------------------------------------------------
 
@@ -304,8 +306,9 @@ gtkNewWindow cfg = do
               , theCairoRenderMode     = VectorMode
               , theCanvasResizeMode    = CanvasResizeClear
               , theGtkCairoSurface     = Nothing
-              , theCairoViewBounds     = rect2D
+              , theCairoClipRegister   = mempty
               , theCairoScreenPrinterState = screenPrinterState
+              , theCairoLogReporter    = theActualLogReporter cfg
               }
           , theAudioPlaybackThread   = StereoPlaybackThread Nothing audio
           -- , theGovernment            = gov
@@ -1062,28 +1065,8 @@ instance HappletWindow Gtk2Provider CairoRender where
   onOSBuffer                = liftGUIProvider . evalCairoOnGtkDrawable
 
   windowClipRegion          = ConfigState
-    { getConfig = onCanvas $ CairoRender $ Just <$> use cairoViewBounds
-    , setConfig = \ case
-        Nothing   -> do
-          winsize <- liftGUIProvider $ do
-            livewin <- gets gtkWindowLive
-            liftIO $ withMVar livewin $
-              fmap (($ point2D) . (pointXY .~) . (fromIntegral *** fromIntegral)) .
-              Gtk.drawableGetSize . gtkDrawWindow
-          onCanvas $ do
-            cairoViewBounds .= (rect2D & rect2DHead .~ winsize)
-            cairoRender Cairo.restore
-        Just irect -> onCanvas $ do
-          let rect = realToFrac <$> irect :: Rect2D Double
-          cairoViewBounds .= irect
-          cairoRender $ do
-            Cairo.save
-            let tail = rect ^. rect2DTail
-            let head = rect ^. rect2DHead
-            let (x, y) = tail ^. pointXY
-            let (w, h) = (head - tail) ^. pointXY
-            Cairo.rectangle x y w h
-            Cairo.clip
+    { getConfig = onCanvas $ getConfig cairoClipRegion
+    , setConfig = onCanvas . setConfig cairoClipRegion
     }
 
   refreshRegion rects       = liftGUIProvider $ do

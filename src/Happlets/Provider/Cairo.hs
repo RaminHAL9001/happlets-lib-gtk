@@ -60,6 +60,9 @@ instance Monoid a => Monoid (CairoRender a) where
   mappend (CairoRender a) (CairoRender b) = CairoRender $ mappend <$> a <*> b
   mempty = return mempty
 
+instance CanWriteReports CairoRender where
+  report lvl msg = CairoRender (gets theCairoLogReporter) <*> pure lvl <*> pure msg >>= liftIO
+
 -- | Lift a @"Graphics.Rendering.Cairo".'Cairo.Render'@ function type into the 'CairoRender'
 -- function type.
 cairoRender :: Cairo.Render a -> CairoRender a
@@ -91,11 +94,12 @@ runCairoRender winsize rendst (CairoRender render) =
 data CairoRenderState
   = CairoRenderState
     { theCairoKeepWinSize        :: !PixSize
-    , theCairoViewBounds         :: !(Rect2D SampCoord)
     , theCanvasResizeMode        :: !CanvasResizeMode
     , theCairoRenderMode         :: !CairoRenderMode
+    , theCairoClipRegister       :: !(Rect2DUnion SampCoord)
     , theCairoScreenPrinterState :: !ScreenPrinterState
     , theGtkCairoSurface         :: !(Maybe Cairo.Surface)
+    , theCairoLogReporter        :: !(LogReporter IO)
     }
 
 -- | Mose Cairo commands work in 'VectorMode' where no special state is necessary. But the
@@ -109,14 +113,18 @@ data CairoRenderMode
 cairoKeepWinSize :: Lens' CairoRenderState PixSize
 cairoKeepWinSize = lens theCairoKeepWinSize $ \ a b -> a{ theCairoKeepWinSize = b }
 
-cairoViewBounds :: Lens' CairoRenderState (Rect2D SampCoord)
-cairoViewBounds = lens theCairoViewBounds $ \ a b -> a{ theCairoViewBounds = b }
-
 canvasResizeMode :: Lens' CairoRenderState CanvasResizeMode
 canvasResizeMode = lens theCanvasResizeMode $ \ a b -> a{ theCanvasResizeMode = b }
 
 cairoRenderMode :: Lens' CairoRenderState CairoRenderMode
 cairoRenderMode = lens theCairoRenderMode $ \ a b -> a{ theCairoRenderMode = b }
+
+-- | Since it is not possible to get the clip region back from the Cairo state once it has been set,
+-- the only way to instantiate the 'windowClipRegion' function is to keep a copy of the clip region
+-- in the 'CairoRenderState'. The 'cairoClipRegister' is the 'Lens' which registers the clip region,
+-- the 'cairoClipRegion' function is the 'ConfigState' function.
+cairoClipRegister :: Lens' CairoRenderState (Rect2DUnion SampCoord)
+cairoClipRegister = lens theCairoClipRegister $ \ a b -> a{ theCairoClipRegister = b }
 
 cairoScreenPrinterState :: Lens' CairoRenderState ScreenPrinterState
 cairoScreenPrinterState = lens theCairoScreenPrinterState $ \ a b ->
@@ -408,7 +416,7 @@ cairoClearCanvas r g b a = do
 ----------------------------------------------------------------------------------------------------
 
 instance Sized2DRaster CairoRender where
-  getViewSize = CairoRender $ rect2DSize <$> gets theCairoViewBounds
+  getViewSize = CairoRender $ gets theCairoKeepWinSize
 
 instance Happlet2DGraphics CairoRender where
   pixel p = let (V2 x y) = realToFrac <$> p in ConfigState
@@ -570,12 +578,15 @@ cairo2DCubic d = do
     Cairo.curveTo x1 y1 x2 y2 x3 y3
 
 -- | Calls the internal Cairo API function 'Cairo.clip' to update the clip region state.
-cairoClipRegion :: ConfigState CairoRender (Rect2D SampCoord)
+cairoClipRegion :: ConfigState CairoRender (Rect2DUnion SampCoord)
 cairoClipRegion = ConfigState
-  { setConfig = \ rect -> do
-      cairoViewBounds .= rect
-      cairoRender $ Cairo.resetClip >> cairoRectangle (toRational <$> rect) >> Cairo.clip
-  , getConfig = use cairoViewBounds
+  { setConfig = \ clip -> do
+      cairoRender $ do
+        Cairo.resetClip
+        mapM_ (cairoRectangle . fmap toRational) $ rect2DUnionToList clip
+        Cairo.clip
+      cairoClipRegister .= clip
+  , getConfig = use cairoClipRegister
   }
 
 ---- | Calls the internal Cairo API function 'Cairo.setOperator' to update the blit operator state.
