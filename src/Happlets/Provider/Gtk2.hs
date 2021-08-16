@@ -34,13 +34,13 @@ module Happlets.Provider.Gtk2
 
 import           Happlets
 import           Happlets.Provider.React
-import           Happlets.Model.Audio
+--import           Happlets.Model.Audio
 --import           Happlets.Model.GUI
 import           Happlets.View
-import           Happlets.View.Audio
+--import           Happlets.View.Audio
 
 import           Happlets.Provider.Cairo      hiding (mkLogger)
-import           Happlets.Provider.ALSA       hiding (gtkAnimationFrameRate)
+--import           Happlets.Provider.ALSA
 import           Happlets.Provider.Gtk2.Debug
 
 import           Control.Concurrent
@@ -153,7 +153,7 @@ data Gtk2Provider
     , gtkWindow               :: !Gtk.Window
     , theGtkEventBox          :: !Gtk.EventBox
     , theCairoRenderState     :: !CairoRenderState
-    , theAudioPlaybackThread  :: !AudioPlaybackThread
+--    , theAudioPlaybackThread  :: !AudioPlaybackThread
     , theInitReaction         :: !(ConnectReact GtkState PixSize)
     , theResizeReaction       :: !(ConnectReact GtkState (OldPixSize, NewPixSize))
     , theVisibilityReaction   :: !(ConnectReact GtkState Bool)
@@ -197,8 +197,8 @@ gtkEventBox = lens theGtkEventBox $ \ a b -> a{ theGtkEventBox = b }
 cairoRenderState :: Lens' Gtk2Provider CairoRenderState
 cairoRenderState = lens theCairoRenderState $ \ a b -> a{ theCairoRenderState = b }
 
-audioPlaybackThread :: Lens' Gtk2Provider AudioPlaybackThread
-audioPlaybackThread = lens theAudioPlaybackThread $ \ a b -> a{ theAudioPlaybackThread = b }
+--audioPlaybackThread :: Lens' Gtk2Provider AudioPlaybackThread
+--audioPlaybackThread = lens theAudioPlaybackThread $ \ a b -> a{ theAudioPlaybackThread = b }
 
 gtkCurrentWindowSize :: Lens' Gtk2Provider PixSize
 gtkCurrentWindowSize = cairoRenderState . cairoKeepWinSize
@@ -293,7 +293,7 @@ gtkNewWindow cfg = do
   Gtk.containerAdd window eventBox
   live  <- newEmptyMVar
   --gov   <- newWorkerUnion
-  audio <- newMVar (const $ return (0, 0))
+  --audio <- newMVar (const $ return (0, 0))
   initProviderState $ \ this -> do
     let env = Gtk2Provider
           { currentConfig            = cfg
@@ -310,7 +310,7 @@ gtkNewWindow cfg = do
               , theCairoScreenPrinterState = screenPrinterState
               , theCairoLogReporter    = theActualLogReporter cfg
               }
-          , theAudioPlaybackThread   = StereoPlaybackThread Nothing audio
+          -- , theAudioPlaybackThread   = StereoPlaybackThread Nothing audio
           -- , theGovernment            = gov
           , theInitReaction          = Disconnected
           , theResizeReaction        = Disconnected
@@ -1117,60 +1117,60 @@ instance HappletPixelBuffer Gtk2Provider CairoRender where
 
 ----------------------------------------------------------------------------------------------------
 
-instance AudioPlayback (GUI Gtk2Provider model) where
-  audioPlayback newGen = liftGUIProvider $ do
-    oldGen <- use audioPlaybackThread
-    let done thid = return $ maybe PCMDeactivated (const PCMActivated) thid
-    let switch constr gen = do
-          mvar <- liftIO $ newMVar gen
-          audioPlaybackThread .= constr Nothing mvar
-          return PCMDeactivated
-    case (oldGen, newGen) of
-      (StereoPlaybackThread thid mvar, PCMGenerateStereo newGen) ->
-        liftIO $ swapMVar mvar newGen >> done thid
-      (MonoPlaybackThread   thid mvar, PCMGenerateMono   newGen) ->
-        liftIO $ swapMVar mvar newGen >> done thid
-      (StereoPlaybackThread Nothing _, PCMGenerateMono   newGen) ->
-        switch MonoPlaybackThread newGen
-      (MonoPlaybackThread   Nothing _, PCMGenerateStereo newGen) ->
-        switch StereoPlaybackThread newGen
-      (StereoPlaybackThread Just{}  _, PCMGenerateMono   _     ) -> return $ PCMError
-        "Audio playback is active in stereo mode, cannot set mono mode PCM generator"
-      (MonoPlaybackThread   Just{}  _, PCMGenerateStereo _     ) -> return $ PCMError
-        "Audio playback is active in mono mode, cannot set stereo mode PCM generator"
-
-  startupAudioPlayback sizeReq = liftGUIProvider $ do
-    let launch
-          :: MVar (FrameCounter -> PCM sample)
-          -> ((FrameCounter -> PCM sample) -> PCMGenerator)
-          -> GtkState PCMActivation
-        launch mvar constGen =
-          liftIO (readMVar mvar >>= startPlaybackThread sizeReq . constGen) >>=
-          assign audioPlaybackThread >>
-          return PCMActivated
-    let already = return $ PCMError
-          "audioPlaybackThread called, audio playback is already activated."
-    use audioPlaybackThread >>= \ case
-      StereoPlaybackThread Nothing mvar -> launch mvar PCMGenerateStereo
-      MonoPlaybackThread   Nothing mvar -> launch mvar PCMGenerateMono
-      StereoPlaybackThread Just{}  _    -> already
-      MonoPlaybackThread   Just{}  _    -> already
-
-  shutdownAudioPlayback = liftGUIProvider $ do
-    let shutdown thid = liftIO (killThread thid) >> return PCMDeactivated
-    let already = return $ PCMError
-          "shutdownAudioPlayback called, audio playback is already deactivated"
-    use audioPlaybackThread >>= \ case
-      StereoPlaybackThread (Just thid) _ -> shutdown thid
-      MonoPlaybackThread   (Just thid) _ -> shutdown thid
-      StereoPlaybackThread  Nothing    _ -> already
-      MonoPlaybackThread    Nothing    _ -> already
-
-  audioPlaybackState = liftGUIProvider $
-    ( maybe PCMDeactivated (const PCMActivated) . \ case
-        StereoPlaybackThread thid _ -> thid
-        MonoPlaybackThread   thid _ -> thid
-    ) <$> use audioPlaybackThread
+--instance AudioPlayback (GUI Gtk2Provider model) where
+--  audioPlayback newGen = liftGUIProvider $ do
+--    oldGen <- use audioPlaybackThread
+--    let done thid = return $ maybe PCMDeactivated (const PCMActivated) thid
+--    let switch constr gen = do
+--          mvar <- liftIO $ newMVar gen
+--          audioPlaybackThread .= constr Nothing mvar
+--          return PCMDeactivated
+--    case (oldGen, newGen) of
+--      (StereoPlaybackThread thid mvar, PCMGenerateStereo newGen) ->
+--        liftIO $ swapMVar mvar newGen >> done thid
+--      (MonoPlaybackThread   thid mvar, PCMGenerateMono   newGen) ->
+--        liftIO $ swapMVar mvar newGen >> done thid
+--      (StereoPlaybackThread Nothing _, PCMGenerateMono   newGen) ->
+--        switch MonoPlaybackThread newGen
+--      (MonoPlaybackThread   Nothing _, PCMGenerateStereo newGen) ->
+--        switch StereoPlaybackThread newGen
+--      (StereoPlaybackThread Just{}  _, PCMGenerateMono   _     ) -> return $ PCMError
+--        "Audio playback is active in stereo mode, cannot set mono mode PCM generator"
+--      (MonoPlaybackThread   Just{}  _, PCMGenerateStereo _     ) -> return $ PCMError
+--        "Audio playback is active in mono mode, cannot set stereo mode PCM generator"
+--
+--  startupAudioPlayback sizeReq = liftGUIProvider $ do
+--    let launch
+--          :: MVar (FrameCounter -> PCM sample)
+--          -> ((FrameCounter -> PCM sample) -> PCMGenerator)
+--          -> GtkState PCMActivation
+--        launch mvar constGen =
+--          liftIO (readMVar mvar >>= startPlaybackThread sizeReq . constGen) >>=
+--          assign audioPlaybackThread >>
+--          return PCMActivated
+--    let already = return $ PCMError
+--          "audioPlaybackThread called, audio playback is already activated."
+--    use audioPlaybackThread >>= \ case
+--      StereoPlaybackThread Nothing mvar -> launch mvar PCMGenerateStereo
+--      MonoPlaybackThread   Nothing mvar -> launch mvar PCMGenerateMono
+--      StereoPlaybackThread Just{}  _    -> already
+--      MonoPlaybackThread   Just{}  _    -> already
+--
+--  shutdownAudioPlayback = liftGUIProvider $ do
+--    let shutdown thid = liftIO (killThread thid) >> return PCMDeactivated
+--    let already = return $ PCMError
+--          "shutdownAudioPlayback called, audio playback is already deactivated"
+--    use audioPlaybackThread >>= \ case
+--      StereoPlaybackThread (Just thid) _ -> shutdown thid
+--      MonoPlaybackThread   (Just thid) _ -> shutdown thid
+--      StereoPlaybackThread  Nothing    _ -> already
+--      MonoPlaybackThread    Nothing    _ -> already
+--
+--  audioPlaybackState = liftGUIProvider $
+--    ( maybe PCMDeactivated (const PCMActivated) . \ case
+--        StereoPlaybackThread thid _ -> thid
+--        MonoPlaybackThread   thid _ -> thid
+--    ) <$> use audioPlaybackThread
 
 ----------------------------------------------------------------------------------------------------
 

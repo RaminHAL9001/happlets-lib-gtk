@@ -23,7 +23,6 @@ library
   default-language: Haskell2010
   hs-source-dirs: src
   exposed-modules:
-    Happlets.Provider.ALSA
     Happlets.Provider.Cairo
     Happlets.Provider.Gtk2
     Happlets.Provider.Gtk2.Debug
@@ -50,7 +49,6 @@ library
     -Wall -Werror -fno-warn-name-shadowing -fno-warn-unused-do-bind
   build-depends:
       base
-    , alsa-pcm
     , array
     , cairo
     , containers
@@ -96,7 +94,6 @@ test-suite happlets-lib-gtk-test
     -Wall -fno-warn-name-shadowing -fno-warn-unused-do-bind -threaded
   build-depends:
       base
-    , alsa-pcm
     , array
     , cairo
     , containers
